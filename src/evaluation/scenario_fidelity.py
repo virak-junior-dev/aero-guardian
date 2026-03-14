@@ -244,7 +244,7 @@ class ScenarioFidelityScorer:
         # This is a VALID inference even without explicit failure keywords
         if config_fault_type and any(x in config_fault_type.lower() for x in ["altitude_violation", "geofence_violation", "airspace"]):
             # Check if report mentions altitude or proximity to airport
-            has_altitude = re.search(r'(\d{2,5})\s*(?:feet|ft|\')', faa_text)
+            has_altitude = re.search(r'([\d,]+)\s*(?:feet|ft|\')', faa_text)
             has_airport = any(kw in faa_text for kw in ["atct", "tower", "approach", "runway", "airport"])
             if has_altitude or has_airport:
                 return 0.9, config_fault_type  # High score - reasonable inference
@@ -283,9 +283,9 @@ class ScenarioFidelityScorer:
         score = 0.0
         
         # Check altitude mentioned
-        alt_match = re.search(r'(\d{2,5})\s*(?:feet|ft|\')', faa_text)
+        alt_match = re.search(r'([\d,]+)\s*(?:feet|ft|\')', faa_text)
         if alt_match:
-            trigger_keywords.append(f"altitude:{alt_match.group(1)}ft")
+            trigger_keywords.append(f"altitude:{alt_match.group(1).replace(',', '')}ft")
             config_alt = config.get("mission", {}).get("takeoff_altitude_m", 0)
             if config_alt > 0:
                 score += 0.3

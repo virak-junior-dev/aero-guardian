@@ -1,0 +1,118 @@
+# Implementation Plan V3: Model-Specific DSPy Enhancers + Detailed Reporting
+
+## Goal
+
+Complete all remaining confirmed work. Three user concerns addressed:
+1. **DSPy is ALWAYS used** for both Claude and OpenAI. Enhancers are additive text injected INTO DSPy, not bypassing it.
+2. **Full E2E flow verified** from 12+ source files and 8 artifacts.
+3. **CSV/Excel detailed report** alongside the confusion matrix PNG.
+
+---
+
+## Clarification: DSPy Flow (Answer to User Question #1)
+
+> [!IMPORTANT]
+> **DSPy is ALWAYS used, regardless of which model provider is active.**
+>
+> The current architecture already works like this:
+> ```
+> llm_setup.py -> dspy.LM("anthropic/claude-3.5") OR dspy.LM("openai/gpt-4o")
+>                        |
+>                   DSPy handles the API call
+>                        |
+>                   signatures.py defines the SAME output schema
+>                        |
+>              Both models produce IDENTICAL structured output
+> ```
+>
+> **What prompt enhancers do:** They inject model-specific text (e.g., Claude XML blocks, OpenAI JSON hints) **into the DSPy signature's docstring** before the call. DSPy still manages the entire request/response. The output schema is identical regardless of model.
+>
+> **Will switching models produce different results?** The output SCHEMA is always the same (same fields, same types). The QUALITY of content may vary slightly because Claude and OpenAI reason differently, but the prompt enhancers minimize this gap by exploiting each model's strengths.
+
+---
+
+## Confirmed End-to-End Flow (Answer to User Question #2)
+
+Verified by reading all source code and artifacts:
+
+```
+1. FAA Sighting Text (raw narrative)
+   |
+2. LLM1 via DSPy (scenario_generator.py + signatures.FAA_To_PX4_Complete)
+   |-- Extracts: fault_type, altitude, lat/lon, uav_model, waypoints, px4_fault_cmd
+   |-- Evaluated by: CSR (Constraint Satisfaction Rate) - did LLM match text constraints?
+   |
+3. PX4 SITL Simulation (run_automated_pipeline.py)
+   |-- Dynamic airframe: iris / plane / standard_vtol via PX4_SYS_AUTOSTART
+   |-- Fault injection at runtime
+   |-- Output: MAVSDK 10Hz JSON telemetry
+   |
+4. BRR Deterministic Evaluation (behavior_validation.py)
+   |-- NO LLM used here - pure Python math
+   |-- RFlyMAD-calibrated 3-sigma thresholds
+   |-- Output: anomaly flags with severity and timestamps
+   |
+5. LLM2 via DSPy (report_generator.py + signatures.GeneratePreFlightReport)
+   |-- Inputs: FAA narrative + telemetry summary + anomaly flags
+   |-- Output: Pre-Flight Safety Report (GO/CAUTION/NO-GO)
+   |-- Evaluated by: AGI (Actionability & Grounding Index) - are recommendations grounded?
+   |
+6. ESRI = CSR x BRR x AGI (evaluate_case.py + esri.py)
+   |-- Capped at 0.85 maximum (FAA source is non-authoritative)
+   |
+7. RFlyMAD Standalone Validation (rflymad_validation.py)
+   |-- Proves BRR thresholds work on real ALFA dataset
+   |-- Output: Confusion Matrix PNG + CSV detailed report
+```
+
+---
+
+## Proposed Changes
+
+### 1. Model-Specific DSPy Prompt Enhancers
+
+#### [NEW] [prompt_enhancers.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/llm/prompt_enhancers.py)
+
+Injects model-optimized prompt text **into** DSPy signature docstrings. DSPy still handles all API calls.
+
+- `BasePromptEnhancer`: Returns base instruction text (universal fallback).
+- `AnthropicEnhancer(BasePromptEnhancer)`: Adds Claude XML `<thinking>`, `<forbidden>`, `<output_rules>` blocks.
+- `OpenAIEnhancer(BasePromptEnhancer)`: Adds JSON schema enforcement hints, system-role strictness preamble.
+- `get_enhancer(provider: str)`: Factory returns correct enhancer. Unknown providers get base (universal).
+
+#### [MODIFY] [llm_setup.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/llm/llm_setup.py)
+
+- Add `get_provider() -> str` utility so enhancers can detect the active model.
+
+#### [MODIFY] [scenario_generator.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/llm/scenario_generator.py)
+
+- Load enhancer in [_configure()](file:///C:/VIRAK/Python%20Code/aero-guardian/src/llm/scenario_generator.py#241-265). Inject enhanced prompt prefix before each DSPy call.
+
+#### [MODIFY] [report_generator.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/llm/report_generator.py)
+
+- Same pattern for LLM2 calls.
+
+---
+
+### 2. RFlyMAD 3-Sigma Statistical Grounding + CSV Report
+
+#### [MODIFY] [rflymad_validation.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/evaluation/rflymad_validation.py)
+
+**Statistical grounding:**
+- Compute [mu](file:///c:/VIRAK/Python%20Code/aero-guardian/src/analysis/faa_analysis.py#460-507) and `sigma` from ALFA normal flights (`is_fault == 0`) for each sensor channel.
+- Replace hardcoded thresholds with `mu + 3 * sigma` (99.7th percentile bounds).
+
+**CSV/Excel detailed report (Answer to User Question #3):**
+- Export `reports/rflymad_detailed_metrics.csv` with columns: `Window_ID`, `Flight_ID`, `True_Label`, `Predicted_Label`, `Max_Vel_Z`, `Max_Gyro_XY`, `Max_Vel_XY`, `Is_Correct`.
+- Export `reports/rflymad_summary_metrics.csv` with per-class Precision, Recall, F1, Support, and Macro averages.
+- Keep the confusion matrix PNG plot.
+- Add per-class F1 bar chart PNG.
+
+---
+
+## Verification Plan
+
+1. `python -c "from src.llm.prompt_enhancers import get_enhancer; print(get_enhancer('anthropic'))"` — Verify enhancer loads.
+2. `python src/evaluation/rflymad_validation.py` — Verify 3-sigma thresholds + CSV output on real ALFA data.
+3. Inspect `reports/rflymad_detailed_metrics.csv` and `reports/rflymad_summary_metrics.csv` for correctness.
+4. Verify switching `LLM_PROVIDER` between `anthropic`/`openai` in `.env` does not break DSPy pipeline.

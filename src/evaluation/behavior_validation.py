@@ -425,7 +425,7 @@ class BehaviorValidator:
             pitches_deg_filtered.append(0 if is_pitch_artifact else pitch)
         
         if artifact_count > 0:
-            logger.info(f"  🔧 Detected {artifact_count} simulation artifact points (extreme angle + stable altitude)")
+            logger.info(f"  >>>>> Detected {artifact_count} simulation artifact points (extreme angle + stable altitude)")
         
         lats = [t.get("lat", 0) for t in telemetry if t.get("lat")]
         lons = [t.get("lon", 0) for t in telemetry if t.get("lon")]

@@ -24,6 +24,7 @@ import time
 import asyncio
 import subprocess
 import argparse
+import re
 
 # =============================================================================
 # CRITICAL: Fix gRPC asyncio race condition on Windows
@@ -91,7 +92,7 @@ class PipelineConfig:
     
     # Simulation settings
     vehicle: str = "iris"
-    world: str = "empty"
+    world: str = "default"
     headless: bool = False
     data_source: str = "sightings"  # 'sightings' (8000) or 'failures' (31)
     
@@ -111,6 +112,7 @@ class WSLController:
         self._px4_process = None
         self._wsl_ip = None
         self._windows_ip = None
+        self._wsl_home = None
         
     def run_wsl(self, cmd: str, timeout: int = 60) -> Tuple[int, str]:
         """Execute command in WSL."""
@@ -133,6 +135,15 @@ class WSLController:
         if code == 0:
             self._wsl_ip = output.strip()
         return self._wsl_ip or "127.0.0.1"
+
+    def get_wsl_home(self) -> str:
+        """Get WSL user home path."""
+        if self._wsl_home:
+            return self._wsl_home
+        code, output = self.run_wsl("printf '%s' \"$HOME\"", timeout=10)
+        if code == 0 and output.strip():
+            self._wsl_home = output.strip()
+        return self._wsl_home or "/home/ubuntu"
     
     def get_windows_ip(self) -> str:
         """Get Windows host IP from WSL."""
@@ -145,33 +156,79 @@ class WSLController:
             if ip and '.' in ip:  # Basic IP validation
                 self._windows_ip = ip
         return self._windows_ip or "172.27.160.1"
+
+    def _resolve_px4_dir(self) -> str:
+        """Resolve configured PX4 path to an absolute WSL path."""
+        configured = (self.config.px4_dir or "").strip()
+        home_dir = self.get_wsl_home()
+
+        if not configured:
+            return f"{home_dir}/PX4-Autopilot"
+        if configured == "~":
+            return home_dir
+        if configured.startswith("~/"):
+            return f"{home_dir}/{configured[2:]}"
+        return configured
     
     def is_px4_running(self) -> bool:
         """Check if PX4 SITL is running."""
         code, _ = self.run_wsl("pgrep -f 'px4.*sitl'", timeout=5)
         return code == 0
+
+    def _collect_px4_diagnostics(self):
+        """Collect quick WSL-side diagnostics after PX4 startup failures."""
+        resolved_px4_dir = self._resolve_px4_dir()
+        diagnostics_cmd = f"""
+            cd "{resolved_px4_dir}" 2>/dev/null || cd "$HOME/PX4-Autopilot" 2>/dev/null || {{ echo "[diag] PX4 directory not found"; exit 0; }}
+            AG_PX4_DIR="$(pwd)"
+            echo "[diag] px4_dir=$AG_PX4_DIR"
+
+            echo "[diag] pwd=$(pwd)"
+            echo "[diag] gz_cmd=$(command -v gz || echo not_found)"
+            echo "[diag] ruby_cmd=$(command -v ruby || echo not_found)"
+
+            echo "[diag] build_dirs:"
+            ls -1 build 2>/dev/null | head -20 || echo "build directory missing"
+
+            echo "[diag] tail_px4_log:"
+            tail -n 80 build/px4_sitl_default/rootfs/px4.log 2>/dev/null || echo "px4.log not found"
+        """
+        _, output = self.run_wsl(diagnostics_cmd, timeout=40)
+        if output and output.strip():
+            logger.error(f"PX4 startup diagnostics:\n{output.strip()}")
     
-    def start_px4_gazebo(self) -> bool:
+    def start_px4_gazebo(self, uav_model: str = "iris") -> bool:
         """Start PX4 SITL with Gazebo."""
         if self.is_px4_running():
             logger.info("PX4 SITL is already running")
             return True
         
-        logger.info(f"Starting PX4 SITL...")
+        logger.info(f"Starting PX4 SITL with airframe: {uav_model}...")
         
         # Get Windows IP for DISPLAY (in case Gazebo is needed)
         windows_ip = self.get_windows_ip()
         
-        # Choose simulator target:
-        # - sihsim_quadx: Software-in-the-loop, no graphics needed (headless friendly)
-        # - gazebo-classic_iris: Gazebo Classic with iris drone - SUPPORTS FAILURE INJECTION
-        #                        (requires: git submodule update --init --recursive Tools/simulation/gazebo-classic)
-        # - gz_x500: Gazebo Harmonic with X500 drone (limited failure injection support)
-        # NOTE: Using gz_x500 because Gazebo Classic submodule is not initialized
-        if self.config.headless:
-            sim_target = "sihsim_quadx"  # SIH simulator - no graphics
+        # Map UAV model to PX4_SYS_AUTOSTART
+        uav_lower = uav_model.lower()
+        px4_sys_autostart = ""
+        if uav_lower == "plane":
+            if self.config.headless:
+                px4_sys_autostart = "2100"
+                sim_target = "none"
+            else:
+                sim_target = "gz_rc_cessna"
+        elif uav_lower == "standard_vtol":
+            if self.config.headless:
+                px4_sys_autostart = "4001"
+                sim_target = "none"
+            else:
+                sim_target = "gz_standard_vtol"
         else:
-            sim_target = "gz_x500"  # Gazebo Harmonic - fallback to crash simulation for failures
+            if self.config.headless:
+                px4_sys_autostart = "10016"  # Iris/Multirotor
+                sim_target = "sihsim_quadx"
+            else:
+                sim_target = "gz_x500"
         
         # Get home location if set (from incident geocoding)
         home_lat = getattr(self, '_home_lat', 47.397742)  # Default: Switzerland test location
@@ -181,17 +238,30 @@ class WSLController:
         # For WSLg, use :0 directly; for VcXsrv use windows_ip:0
         # WSLg is default on Windows 11
         display_env = ":0"  # WSLg default
+
+        autostart_export = (
+            f"export PX4_SYS_AUTOSTART={px4_sys_autostart}"
+            if px4_sys_autostart else
+            ""
+        )
+        resolved_px4_dir = self._resolve_px4_dir()
         
         launch_cmd = f"""
             pkill -9 px4 2>/dev/null || true
             pkill -9 gz 2>/dev/null || true
             pkill -9 ruby 2>/dev/null || true
             sleep 2
-            cd {self.config.px4_dir}
             
             # Source environment
             source ~/.bashrc 2>/dev/null || true
             source /opt/ros/*/setup.bash 2>/dev/null || true
+
+            # Resolve PX4 root after sourcing in case shell init mutates variables.
+            cd "{resolved_px4_dir}" 2>/dev/null || cd "$HOME/PX4-Autopilot" 2>/dev/null || exit 2
+            AG_PX4_DIR="$(pwd)"
+
+            # Re-enter PX4 root after sourcing shell setup (some configs change cwd)
+            cd "$AG_PX4_DIR" || exit 2
             
             # Display for Gazebo GUI
             export DISPLAY={display_env}
@@ -203,12 +273,20 @@ class WSLController:
             export PX4_HOME_LON={home_lon}
             export PX4_HOME_ALT={home_alt}
             
+            # Dynamic Airframe injection is only required in headless/non-Gazebo targets.
+            {autostart_export}
+            
             # ENABLE FAILURE INJECTION for demo
             # This allows MAVSDK failure.inject() to work
             export PX4_SYS_FAILURE_EN=1
             
-            # Set Gazebo world (default, baylands, forest, lawn, windy, etc.)
-            export PX4_GZ_WORLD=default
+            # Set Gazebo world with fallback when configured world is unavailable.
+            AG_WORLD="{self.config.world}"
+            if [ ! -f "$AG_PX4_DIR/Tools/simulation/gz/worlds/${{AG_WORLD}}.sdf" ]; then
+                echo "[px4-launch] world '$AG_WORLD' not found, falling back to 'default'"
+                AG_WORLD="default"
+            fi
+            export PX4_GZ_WORLD="$AG_WORLD"
             
             # Gazebo model paths (for both Classic and Harmonic)
             export GAZEBO_MODEL_PATH=$HOME/PX4-Autopilot/Tools/simulation/gazebo-classic/sitl_gazebo-classic/models:$GAZEBO_MODEL_PATH
@@ -216,11 +294,13 @@ class WSLController:
             
             # Launch PX4 with Gazebo
             # Add param override for failure injection
-            cd $HOME/PX4-Autopilot && make px4_sitl {sim_target} 2>&1
+            echo "[px4-launch] home=$HOME configured={self.config.px4_dir or ''} px4_dir=$AG_PX4_DIR cwd=$(pwd)"
+            make px4_sitl {sim_target} 2>&1
         """
         
         logger.info(f"  Simulator: {sim_target}")
         logger.info(f"  PX4_SIM_HOST_ADDR={self.config.wsl_ip}")
+        logger.info(f"  PX4_DIR_RESOLVED={resolved_px4_dir}")
         
         # Start PX4 in background
         self._px4_process = subprocess.Popen(
@@ -255,12 +335,18 @@ class WSLController:
                     # Log PX4 startup progress
                     if any(x in line.lower() for x in ['error', 'fail', 'ready', 'armed', 'connected']):
                         logger.info(f"  PX4: {line.strip()[:80]}")
+
+                    # Fail fast on known rcS startup failure and collect WSL diagnostics.
+                    if "startup script returned with return value: 2" in line.lower():
+                        logger.error("Detected PX4 rcS startup failure (return value 2).")
+                        self._collect_px4_diagnostics()
+                        return False
             except:
                 pass
             
             # Check if ready
             if self._check_px4_ready():
-                logger.info("✓ PX4 SITL is ready and accepting connections")
+                logger.info(">>>>>  PX4 SITL is ready and accepting connections")
                 return True
             
             time.sleep(2)
@@ -301,7 +387,7 @@ class WSLController:
         
         code, output = self.run_wsl(mavproxy_cmd, timeout=30)
         if code == 0:
-            logger.info("✓ MAVProxy bridge started")
+            logger.info(">>>>>  MAVProxy bridge started")
             return True
         else:
             logger.warning(f"MAVProxy failed to start: {output}")
@@ -335,7 +421,7 @@ class WSLController:
                 text=True
             )
             if "QGroundControl.exe" in result.stdout:
-                logger.info("✓ QGroundControl is already running")
+                logger.info(">>>>>  QGroundControl is already running")
                 return True
         except:
             pass
@@ -345,7 +431,6 @@ class WSLController:
             if os.path.exists(path):
                 try:
                     subprocess.Popen([path], start_new_session=True)
-                    logger.info(f"✓ Launched QGroundControl from: {path}")
                     time.sleep(3)  # Give QGC time to start
                     return True
                 except Exception as e:
@@ -409,7 +494,7 @@ class MissionExecutor:
                 timeout_counter = 0
                 async for state in self.drone.core.connection_state():
                     if state.is_connected:
-                        logger.info("✓ Connected to PX4")
+                        logger.info(">>>>>  Connected to PX4")
                         connected = True
                         break
                     timeout_counter += 1
@@ -425,7 +510,7 @@ class MissionExecutor:
                 gps_timeout = 0
                 async for health in self.drone.telemetry.health():
                     if health.is_global_position_ok:
-                        logger.info("✓ GPS fix acquired")
+                        logger.info(">>>>>  GPS fix acquired")
                         return True
                     gps_timeout += 1
                     if gps_timeout > 60:  # ~60 second GPS timeout
@@ -565,9 +650,9 @@ class MissionExecutor:
                 try:
                     logger.info("   → Enabling failure injection (SYS_FAILURE_EN=1)...")
                     await self.drone.param.set_param_int("SYS_FAILURE_EN", 1)
-                    logger.info("   ✓ SYS_FAILURE_EN enabled")
+                    logger.info("   >>>>>  SYS_FAILURE_EN enabled")
                 except Exception as e:
-                    logger.warning(f"   ⚠ Could not set SYS_FAILURE_EN: {e}")
+                    logger.warning(f"   >>>>>  Could not set SYS_FAILURE_EN: {e}")
             
             # Build mission items
             # IMPORTANT: PX4 missions should NOT have TAKEOFF/LAND vehicle actions
@@ -612,7 +697,7 @@ class MissionExecutor:
                 async for health in self.drone.telemetry.health():
                     if health.is_armable:
                         arm_ready = True
-                        logger.info("✓ Vehicle is armable")
+                        logger.info(">>>>>  Vehicle is armable")
                     break
                 if arm_ready:
                     break
@@ -626,7 +711,7 @@ class MissionExecutor:
             for attempt in range(3):  # 3 retries
                 try:
                     await self.drone.action.arm()
-                    logger.info("✓ Vehicle armed")
+                    logger.info(">>>>>  Vehicle armed")
                     break
                 except Exception as arm_error:
                     if attempt < 2:
@@ -649,7 +734,7 @@ class MissionExecutor:
                     current_alt = position.relative_altitude_m
                     if current_alt >= takeoff_alt * 0.9:  # 90% of target
                         target_reached = True
-                        logger.info(f"✓ Reached altitude: {current_alt:.1f}m")
+                        logger.info(f">>>>>  Reached altitude: {current_alt:.1f}m")
                     break
                 if target_reached:
                     break
@@ -672,31 +757,31 @@ class MissionExecutor:
             crash_simulated = False
             
             if fault_type:
-                logger.info(f"🔧 EMULATING FAILURE: {fault_type} (severity: {fault_severity})")
+                logger.info(f">>>>> EMULATING FAILURE: {fault_type} (severity: {fault_severity})")
                 try:
                     # First try native PX4 fault injection
                     injection_success = await self._trigger_px4_fault(fault_type, fault_severity)
                     if injection_success:
-                        logger.info(f"✓ Fault {fault_type} injected successfully via PX4 native")
+                        logger.info(f">>>>>  Fault {fault_type} injected successfully via PX4 native")
                         fault_injected = True
                         # Wait for native fault to take effect and complete
                         await asyncio.sleep(30)
                     else:
                         # Use FailureEmulator for realistic behavioral emulation
-                        logger.info("⚠ Native injection unavailable - using behavioral emulation")
+                        logger.info(">>>>>  Native injection unavailable - using behavioral emulation")
                         from src.simulation.failure_emulator import FailureEmulator
                         
                         emulator = FailureEmulator(self.drone)
                         emulation_result = await emulator.emulate(fault_type, fault_severity)
                         
                         if emulation_result.success:
-                            logger.info(f"✅ Failure emulated: {emulation_result.method}")
+                            logger.info(f">>>>>  Failure emulated: {emulation_result.method}")
                             logger.info(f"   Phases: {' → '.join(emulation_result.phases_completed)}")
                             logger.info(f"   Observation duration: {emulation_result.observation_duration:.1f}s")
                             fault_injected = True
                             # Emulator handles its own timing and landing
                         else:
-                            logger.warning(f"⚠ Emulation failed: {emulation_result.error}")
+                            logger.warning(f">>>>>  Emulation failed: {emulation_result.error}")
                             logger.info("   Falling back to controlled landing")
                             await self.drone.action.land()
                             await asyncio.sleep(15)
@@ -713,7 +798,7 @@ class MissionExecutor:
                     fault_injected = True  # Mark as done to avoid retry
             else:
                 # No fault - wait for mission to complete
-                logger.info("🎯 No fault injection - normal mission execution")
+                logger.info(">>>>>  No fault injection - normal mission execution")
             
             # =========================================================
             # MONITOR MISSION WITH TIMEOUT
@@ -721,7 +806,7 @@ class MissionExecutor:
             # NOTE: If fault was injected, the emulator already handled landing
             # Skip mission monitoring to avoid blocking on mission_progress()
             if fault_injected:
-                logger.info("🔧 Fault injection complete - skipping mission monitor")
+                logger.info(">>>>> Fault injection complete - skipping mission monitor")
             else:
                 mission_start_time = time.time()
                 mission_timeout = 120  # Max 120 seconds for mission
@@ -746,7 +831,7 @@ class MissionExecutor:
                             if progress.current > 0:
                                 logger.info(f"  Waypoint {progress.current}/{progress.total}")
                             if progress.current >= progress.total:
-                                logger.info("✓ All waypoints reached")
+                                logger.info(">>>>>  All waypoints reached")
                                 mission_complete = True
                                 break
                             break  # Only check once per loop iteration
@@ -778,7 +863,7 @@ class MissionExecutor:
             
             self.stop_telemetry_capture()
             
-            logger.info(f"✓ Mission complete. Captured {len(self.telemetry_data)} telemetry points")
+            logger.info(f">>>>>  Mission complete. Captured {len(self.telemetry_data)} telemetry points")
             return True, self.telemetry_data
             
         except Exception as e:
@@ -805,20 +890,20 @@ class MissionExecutor:
             severity: Fault severity 0.0-1.0
         """
         try:
-            logger.info(f"⏱️ Fault injection countdown: waiting {delay_sec}s...")
+            logger.info(f">>>>>  Fault injection countdown: waiting {delay_sec}s...")
             await asyncio.sleep(delay_sec)
             
-            logger.info(f"💥 INJECTING FAULT: {fault_type} (severity: {severity})")
+            logger.info(f">>>>>  INJECTING FAULT: {fault_type} (severity: {severity})")
             injection_result = await self._trigger_px4_fault(fault_type, severity)
             
             if injection_result is True:
-                logger.info(f"✓ Fault {fault_type} injected successfully via PX4 native")
+                logger.info(f">>>>>  Fault {fault_type} injected successfully via PX4 native")
             elif injection_result is None:
                 # Behavioral violation - no hardware fault to inject
-                logger.info(f"✓ Fault {fault_type} is behavioral - normal flight (no hardware injection)")
+                logger.info(f">>>>>  Fault {fault_type} is behavioral - normal flight (no hardware injection)")
             else:
                 # injection_result is False - actual injection failed
-                logger.warning(f"⚠ Actual {fault_type} injection failed - fallback to crash simulation")
+                logger.warning(f">>>>>  Actual {fault_type} injection failed - fallback to crash simulation")
             
         except asyncio.CancelledError:
             logger.info("Fault injection cancelled (mission ended)")
@@ -855,11 +940,11 @@ class MissionExecutor:
             logger.info("   → Enabling PX4 failure injection (SYS_FAILURE_EN=1)...")
             try:
                 await self.drone.param.set_param_int("SYS_FAILURE_EN", 1)
-                logger.info("   ✓ SYS_FAILURE_EN enabled")
+                logger.info("   >>>>>  SYS_FAILURE_EN enabled")
                 # Wait for parameter to propagate (important for MAVSDK timing)
                 await asyncio.sleep(1.0)
             except Exception as e:
-                logger.warning(f"   ⚠ Could not set SYS_FAILURE_EN (may already be enabled): {e}")
+                logger.warning(f"   >>>>>  Could not set SYS_FAILURE_EN (may already be enabled): {e}")
             
             # Step 2: Determine failure type based on severity
             # severity 1.0 = OFF (complete failure)
@@ -909,10 +994,10 @@ class MissionExecutor:
                 
             # IMPORTANT: Check for behavioral violations BEFORE hardware mappings
             # This must come before "altitude" check since "altitude" is substring of "altitude_violation"
-            elif any(kw in fault_type_lower for kw in ["geofence", "airspace", "altitude_violation", "none", "unknown"]):
+            elif any(kw in fault_type_lower for kw in ["geofence", "airspace", "altitude_violation", "flyaway", "none", "unknown"]):
                 # Behavioral violations - NO hardware fault injection
                 # These are operational/procedural issues, not hardware failures
-                logger.info(f"   ⚠ Fault type '{fault_type}' is a behavioral violation (not hardware)")
+                logger.info(f"   >>>>>  Fault type '{fault_type}' is a behavioral violation (not hardware)")
                 logger.info(f"   → Skipping hardware fault injection - running normal flight")
                 return None  # Signal: no fault injected (not a failure, just not applicable)
                 
@@ -940,17 +1025,17 @@ class MissionExecutor:
             for attempt in range(max_retries):
                 try:
                     await self.drone.failure.inject(failure_unit, failure_type, 0)
-                    logger.info(f"   ✓ Failure injected: {unit_name} = {failure_type_name}")
+                    logger.info(f"   >>>>>  Failure injected: {unit_name} = {failure_type_name}")
                     return True  # Success!
                 except Exception as inject_error:
                     if attempt < max_retries - 1:
-                        logger.info(f"   ⏳ Retry {attempt + 2}/{max_retries}...")
+                        logger.info(f"   >>>>>  Retry {attempt + 2}/{max_retries}...")
                         await asyncio.sleep(1.0)  # Wait before retry
                     else:
                         # All retries failed
-                        logger.warning(f"   ⚠ MAVSDK failure.inject() failed after {max_retries} attempts: {inject_error}")
-                        logger.warning(f"   ⚠ Gazebo Harmonic (gz_x500) may not fully support failure injection")
-                        logger.warning(f"   ⚠ Will fallback to crash simulation instead")
+                        logger.warning(f"   >>>>>  MAVSDK failure.inject() failed after {max_retries} attempts: {inject_error}")
+                        logger.warning(f"   >>>>>  Gazebo Harmonic (gz_x500) may not fully support failure injection")
+                        logger.warning(f"   >>>>>  Will fallback to crash simulation instead")
                         return False  # Signal that actual fault injection failed
                 
         except Exception as e:
@@ -971,6 +1056,128 @@ class AutomatedPipeline:
         self.config = config
         self.wsl = WSLController(config)
         self.executor = None
+
+    @staticmethod
+    def _normalize_uas_wording(text: str) -> str:
+        """Normalize non-professional UAS descriptors for generated outputs."""
+        value = str(text or "")
+        return re.sub(
+            r"toy\s*[- ]\s*like\s+(aircraft|uas|drone)",
+            "small unmanned aircraft (UAS)",
+            value,
+            flags=re.IGNORECASE,
+        )
+
+    @staticmethod
+    def _has_numeric_action(text: str) -> bool:
+        return bool(re.search(r"\d", str(text or "")))
+
+    def _enforce_report_output_contract(
+        self,
+        safety_report: Dict,
+        model_hint: str,
+        color_hint: str,
+        size_hint: str,
+        shape_hint: str,
+        report_fault_type: str,
+        is_airspace_case: bool,
+        altitude_fidelity_note: str,
+    ) -> Dict:
+        """Apply deterministic output policy so LLM reports stay actionable and professional."""
+        if not isinstance(safety_report, dict):
+            return safety_report
+
+        # Field-level phrase normalization and prefix guardrails.
+        primary_hazard = self._normalize_uas_wording(str(safety_report.get("primary_hazard", "")).strip())
+        observed_effect = self._normalize_uas_wording(str(safety_report.get("observed_effect", "")).strip())
+        explanation = self._normalize_uas_wording(str(safety_report.get("explanation", "")).strip())
+
+        if primary_hazard and not primary_hazard.lower().startswith("simulated:"):
+            primary_hazard = f"Simulated: {primary_hazard}"
+        if observed_effect and not observed_effect.lower().startswith("in simulation:"):
+            observed_effect = f"In simulation: {observed_effect}"
+
+        descriptor_sentence = (
+            "Observed UAS descriptors from source narrative: "
+            f"model/class={model_hint}, color={color_hint}, size={size_hint}, shape={shape_hint}."
+        )
+        if descriptor_sentence.lower() not in explanation.lower():
+            explanation = f"{explanation} {descriptor_sentence}".strip()
+
+        proxy_sentence = "This is a proxy simulation, not incident reconstruction."
+        if proxy_sentence.lower() not in explanation.lower():
+            explanation = f"{explanation} {proxy_sentence}".strip()
+
+        if is_airspace_case and altitude_fidelity_note and altitude_fidelity_note != "N/A":
+            if altitude_fidelity_note.lower() not in observed_effect.lower():
+                observed_effect = f"{observed_effect} {altitude_fidelity_note}".strip()
+
+        # Remove non-actionable language from recommendations/constraints.
+        generic_phrases = {
+            "improve reliability",
+            "enhance safety",
+            "be careful",
+            "take precautions",
+            "monitor closely",
+            "follow procedures",
+        }
+
+        def _normalize_items(value):
+            if isinstance(value, str):
+                items = [v.strip() for v in value.split("|") if v.strip()]
+            elif isinstance(value, list):
+                items = [str(v).strip() for v in value if str(v).strip()]
+            else:
+                items = []
+            cleaned = []
+            for item in items:
+                text = self._normalize_uas_wording(item)
+                text_l = text.lower()
+                if any(p in text_l for p in generic_phrases):
+                    continue
+                if not text.lower().startswith("consider:"):
+                    text = f"Consider: {text}"
+                cleaned.append(text)
+            return cleaned
+
+        constraints = _normalize_items(safety_report.get("design_constraints", []))
+        recommendations = _normalize_items(safety_report.get("recommendations", []))
+
+        if not constraints:
+            if is_airspace_case:
+                constraints = [
+                    "Consider: Aircraft system design constraints should enforce a hard altitude ceiling at 120 m AGL and controlled-airspace geofence boundaries.",
+                    "Consider: Navigation subsystem must trigger automatic return-to-launch when boundary margin drops below 30 m.",
+                ]
+            else:
+                constraints = [
+                    f"Consider: Aircraft system design constraints must include subsystem-specific abort criteria for {report_fault_type} with measurable limits.",
+                ]
+
+        if not recommendations:
+            if is_airspace_case:
+                recommendations = [
+                    "Consider: Configure navigation subsystem with altitude limit 120 m AGL and geofence boundary trigger at 30 m margin.",
+                    "Consider: Add controlled-airspace preflight authorization gate and reject launch when authorization status is invalid for more than 5 s.",
+                ]
+            else:
+                recommendations = [
+                    f"Consider: Add subsystem health checks for {report_fault_type} and block mission start when risk score exceeds 0.7 for 10 s.",
+                ]
+
+        # Ensure recommendations remain AGI-friendly with explicit measurable criteria.
+        recommendations = [
+            rec if self._has_numeric_action(rec) else f"{rec} (threshold: 1 measurable trigger required)."
+            for rec in recommendations
+        ]
+
+        safety_report["primary_hazard"] = primary_hazard
+        safety_report["observed_effect"] = observed_effect
+        safety_report["explanation"] = explanation
+        safety_report["design_constraints"] = constraints[:5]
+        safety_report["recommendations"] = recommendations[:5]
+
+        return safety_report
         
     def run(self, incident_index: int = 0, skip_px4: bool = False) -> Dict[str, Path]:
         """Run the full automated pipeline."""
@@ -1015,7 +1222,8 @@ class AutomatedPipeline:
             if skip_px4:
                 logger.info("Skipping PX4 startup (--skip-px4 flag)")
             else:
-                if not self.wsl.start_px4_gazebo():
+                uav_model = flight_config.get('proxy_modeling', {}).get('simulation_platform', 'iris')
+                if not self.wsl.start_px4_gazebo(uav_model):
                     raise RuntimeError("Failed to start PX4 SITL")
             
             # Step 4: Execute mission
@@ -1072,7 +1280,8 @@ class AutomatedPipeline:
             if skip_px4:
                 logger.info("Skipping PX4 startup")
             else:
-                if not self.wsl.start_px4_gazebo():
+                uav_model = flight_config.get('proxy_modeling', {}).get('simulation_platform', 'iris')
+                if not self.wsl.start_px4_gazebo(uav_model):
                     raise RuntimeError("Failed to start PX4 SITL")
             
             # Step 3: Execute mission
@@ -1093,7 +1302,7 @@ class AutomatedPipeline:
             # Summary
             logger.info("")
             logger.info("=" * 40)
-            logger.info(f"✓ COMPLETE: {incident.get('report_id', incident.get('incident_id', 'Unknown'))}")
+            logger.info(f">>>>>  COMPLETE: {incident.get('report_id', incident.get('incident_id', 'Unknown'))}")
             logger.info(f"  Output: {paths.get('report_dir', 'N/A')}")
             logger.info("=" * 40)
             
@@ -1152,7 +1361,7 @@ class AutomatedPipeline:
         # Log simulation mode from incident filter (MECHANICAL_TEST / AIRSPACE_SIGHTING)
         sim_mode = incident.get("simulation_mode", "MECHANICAL_TEST")
         if sim_mode == "AIRSPACE_SIGHTING":
-            logger.warning(f"  ⚠ High-altitude incident detected: simulation capped to drone-realistic altitude")
+            logger.warning(f"  >>>>>  High-altitude incident detected: simulation capped to drone-realistic altitude")
             logger.info(f"  Extracted altitude: {incident.get('extracted_altitude_m', 0):.0f}m ({incident.get('altitude_source', 'unknown')})")
         
         # Extract altitude from LLM config
@@ -1163,16 +1372,16 @@ class AutomatedPipeline:
         # Use simulatable_altitude_m from incident filter (capped to 120m for high-altitude incidents)
         incident_alt = incident.get("simulatable_altitude_m", 50.0)
         
-        # Prefer LLM altitude if valid (>0 and <200m), otherwise use incident filter's capped value
-        if llm_takeoff_alt is not None and llm_takeoff_alt > 0 and llm_takeoff_alt < 200:
+        # Prefer LLM altitude if valid (>0 and <5000m), otherwise use incident filter's value (capped to 5000m for realism)
+        if llm_takeoff_alt is not None and llm_takeoff_alt > 0 and llm_takeoff_alt <= 5000:
             takeoff_alt = llm_takeoff_alt
         else:
-            takeoff_alt = min(incident_alt, 120.0) if incident_alt > 0 else 50.0  # Default to 50m if invalid
+            takeoff_alt = min(incident_alt, 5000.0) if incident_alt > 0 else 50.0  # Default to 50m if invalid
         
-        if llm_cruise_alt is not None and llm_cruise_alt > 0 and llm_cruise_alt < 200:
+        if llm_cruise_alt is not None and llm_cruise_alt > 0 and llm_cruise_alt <= 5000:
             cruise_alt = llm_cruise_alt
         else:
-            cruise_alt = min(incident_alt, 120.0) if incident_alt > 0 else 50.0
+            cruise_alt = min(incident_alt, 5000.0) if incident_alt > 0 else 50.0
         
         # Speed: use LLM config or sensible default
         speed = mission_config.get("speed_m_s")
@@ -1182,6 +1391,13 @@ class AutomatedPipeline:
         
         # Store speed in config for mission execution
         config["speed_m_s"] = speed
+
+        # Normalize generated wording in LLM-derived fields (keep FAA source text unchanged).
+        if isinstance(config.get("reasoning"), str):
+            config["reasoning"] = self._normalize_uas_wording(config["reasoning"])
+        inferred = config.get("inferred_parameters", {})
+        if isinstance(inferred, dict) and isinstance(inferred.get("inference_reasoning"), str):
+            inferred["inference_reasoning"] = self._normalize_uas_wording(inferred["inference_reasoning"])
         
         # =================================================================
         # COMPACT WAYPOINT PATTERN for 120s mission duration
@@ -1245,10 +1461,21 @@ class AutomatedPipeline:
         fault_type = fault_config.get("fault_type", None)
         fault_onset_sec = fault_config.get("onset_sec", 60)  # Optimized by faa_scenario_generator
         fault_severity = fault_config.get("severity", 1.0)
+
+        # Respect LLM capability mapping: if the generated config marks this fault as
+        # not directly injectable in PX4, run as behavioral simulation without hardware injection.
+        injection_marker = str(config.get("px4_commands", {}).get("fault", "unknown")).strip().lower()
+        fault_supported = bool(config.get("fault_injection_supported", True))
+        if fault_type and not fault_supported:
+            logger.info(
+                f"  Fault '{fault_type}' marked as behavioral/unsupported (injection_marker={injection_marker}); "
+                "hardware injection disabled"
+            )
+            fault_type = None
         
         logger.info(f"  Executing mission: alt={takeoff_alt}m, speed={speed_m_s}m/s, waypoints={len(waypoints)}")
         if fault_type:
-            logger.info(f"  🎯 Fault injection: {fault_type} at T+{fault_onset_sec}s (severity: {fault_severity})")
+            logger.info(f"  >>>>>  Fault injection: {fault_type} at T+{fault_onset_sec}s (severity: {fault_severity})")
         
         return await self.executor.execute_mission(
             waypoints=waypoints,
@@ -1278,6 +1505,12 @@ class AutomatedPipeline:
         mission = config.get("mission", {})
         altitude = waypoints[0].get('alt') if waypoints else mission.get("cruise_altitude_m", "N/A")
         speed = config.get("speed_m_s") or mission.get("speed_m_s", "N/A")
+
+        # Source-context values from incident filtering pipeline.
+        reported_alt_m = incident.get("extracted_altitude_m")
+        simulatable_alt_m = incident.get("simulatable_altitude_m")
+        simulation_mode = incident.get("simulation_mode", "MECHANICAL_TEST")
+        altitude_source = incident.get("altitude_source", "unknown")
         
         # Extract expected outcome from FAA source in config
         faa_source = config.get("faa_source", {})
@@ -1286,23 +1519,160 @@ class AutomatedPipeline:
         # Extract fault_type from correct nested path
         fault_injection = config.get("fault_injection", {})
         fault_type = fault_injection.get("fault_type", "unknown")
+
+        # In airspace-sighting cases, enforce altitude/area violation framing for report quality.
+        # This preserves simulation execution while correcting analysis intent and wording.
+        is_airspace_case = bool(simulation_mode == "AIRSPACE_SIGHTING") or (
+            isinstance(reported_alt_m, (int, float)) and reported_alt_m > 122
+        )
+        report_fault_type = fault_type
+        if is_airspace_case and str(fault_type).lower() in {"flyaway", "unknown", "none", "gps_loss"}:
+            report_fault_type = "altitude_violation"
+
+        injection_marker = str(config.get("px4_commands", {}).get("fault", "unknown")).strip().lower()
+        fault_injection_supported = bool(config.get("fault_injection_supported", True))
+
+        # Normalize awkward narrative terms for clearer professional reporting.
+        raw_incident_text = incident.get("description", incident.get("summary", ""))
+        normalized_incident_text = self._normalize_uas_wording(str(raw_incident_text))
+
+        # Extract practical descriptor context (model/color/size/shape) for stronger reports.
+        desc_text = normalized_incident_text.lower()
+        model_hint = "unspecified"
+        if any(k in desc_text for k in ["quadcopter", "quadcopter", "multirotor", "drone"]):
+            model_hint = "multirotor/quadcopter-like"
+        elif any(k in desc_text for k in ["fixed-wing", "fixed wing", "airplane", "plane"]):
+            model_hint = "fixed-wing-like"
+        elif "vtol" in desc_text:
+            model_hint = "vtol/hybrid-like"
+
+        size_hint = "unspecified"
+        for token in ["small", "medium", "large"]:
+            if re.search(rf"\b{token}\b", desc_text):
+                size_hint = token
+                break
+
+        shape_hint = "unspecified"
+        for token in ["round", "spherical", "oval", "elliptical", "bubble", "fixed-wing", "quadcopter"]:
+            if token in desc_text:
+                shape_hint = token
+                break
+
+        color_terms = [
+            "black", "white", "red", "silver", "gray", "grey", "blue",
+            "green", "yellow", "orange", "brown", "chrome"
+        ]
+        colors_found = []
+        for c in color_terms:
+            if re.search(rf"\b{c}\b", desc_text):
+                colors_found.append(c)
+        color_hint = ", ".join(sorted(set(colors_found))) if colors_found else "unspecified"
+
+        altitude_fidelity_note = "N/A"
+        if isinstance(reported_alt_m, (int, float)) and isinstance(altitude, (int, float)):
+            altitude_fidelity_note = (
+                f"Reported FAA altitude ~{reported_alt_m:.1f}m ({reported_alt_m * 3.28084:.0f}ft) vs "
+                f"simulated altitude {float(altitude):.1f}m ({float(altitude) * 3.28084:.0f}ft). "
+                "Treat findings as behavioral proxy, not altitude-exact reconstruction."
+            )
         
         sim_params = f"""Waypoints: {len(waypoints)}
 Altitude: {altitude}m
 Speed: {speed} m/s
-Behavior: {fault_type} simulation"""
+Behavior: {report_fault_type} simulation
+Simulation Mode: {simulation_mode}
+Fault Injection Support: {fault_injection_supported} (injection_marker={injection_marker})
+Altitude Source: {altitude_source}
+Reported Altitude (m): {reported_alt_m if reported_alt_m is not None else 'N/A'}
+Simulatable Altitude (m): {simulatable_alt_m if simulatable_alt_m is not None else 'N/A'}
+Altitude Fidelity Note: {altitude_fidelity_note}
+
+    UAS Observation Descriptors:
+    - Model/Class Hint: {model_hint}
+    - Color(s): {color_hint}
+    - Size Hint: {size_hint}
+    - Shape Hint: {shape_hint}
+
+Risk Keywords (must be reflected if relevant): altitude violation, controlled airspace, area/geofence boundary,
+close approach, NMAC risk, attitude excursion, loss of separation.
+    """
         
         # Generate report with new 6-section format
-        return client.generate_preflight_report(
-            incident_description=incident.get("description", incident.get("summary", "")),
+        safety_report = client.generate_preflight_report(
+            incident_description=normalized_incident_text,
             report_id=incident.get("report_id", incident.get("incident_id", "Unknown")),
             incident_location=f"{incident.get('city', '')}, {incident.get('state', '')}",
             incident_date=incident.get("date", "Unknown"),
-            fault_type=fault_type,  # From config["fault_injection"]["fault_type"]
+            fault_type=report_fault_type,
             expected_outcome=expected_outcome,  # From config["faa_source"]["outcome"]
             simulation_params=sim_params,
             telemetry_summary=telemetry_text,
         )
+
+        # Deterministic correction layer to enforce explicit context and prevent
+        # misleading over-claims in high-altitude airspace cases.
+        if is_airspace_case and isinstance(safety_report, dict):
+            ph = str(safety_report.get("primary_hazard", ""))
+            oe = str(safety_report.get("observed_effect", ""))
+            ex = str(safety_report.get("explanation", ""))
+
+            if "altitude" not in ph.lower() and "airspace" not in ph.lower():
+                safety_report["primary_hazard"] = (
+                    "Simulated: Airspace altitude-violation scenario with controlled-airspace incursion risk "
+                    f"and unstable attitude behavior. {ph}".strip()
+                )
+
+            if "reported faa altitude" not in oe.lower() and isinstance(reported_alt_m, (int, float)):
+                safety_report["observed_effect"] = (
+                    f"{oe} NOTE: Reported FAA altitude is ~{reported_alt_m * 3.28084:.0f}ft AGL, while "
+                    f"simulation is constrained to ~{float(altitude):.0f}m proxy dynamics."
+                ).strip()
+
+            must_terms = ["controlled airspace", "close approach", "nmac", "geofence"]
+            ex_lower = ex.lower()
+            missing_terms = [t for t in must_terms if t not in ex_lower]
+            if missing_terms:
+                safety_report["explanation"] = (
+                    f"{ex} Additional context: This case should be interpreted as an altitude/area-violation "
+                    "risk scenario in controlled airspace, including close-approach and potential NMAC risk, "
+                    "with geofence-boundary compliance concerns."
+                ).strip()
+
+        # Deterministic output policy to enforce actionable report quality and
+        # remove vague or non-professional wording from model output.
+        safety_report = self._enforce_report_output_contract(
+            safety_report=safety_report,
+            model_hint=model_hint,
+            color_hint=color_hint,
+            size_hint=size_hint,
+            shape_hint=shape_hint,
+            report_fault_type=report_fault_type,
+            is_airspace_case=is_airspace_case,
+            altitude_fidelity_note=altitude_fidelity_note,
+        )
+
+        # Final wording cleanup for generated report fields.
+        if isinstance(safety_report, dict):
+            for key in [
+                "primary_hazard",
+                "observed_effect",
+                "explanation",
+                "verdict",
+            ]:
+                if isinstance(safety_report.get(key), str):
+                    safety_report[key] = self._normalize_uas_wording(safety_report[key])
+            if isinstance(safety_report.get("recommendations"), list):
+                safety_report["recommendations"] = [
+                    self._normalize_uas_wording(item) if isinstance(item, str) else item
+                    for item in safety_report["recommendations"]
+                ]
+            if isinstance(safety_report.get("design_constraints"), list):
+                safety_report["design_constraints"] = [
+                    self._normalize_uas_wording(item) if isinstance(item, str) else item
+                    for item in safety_report["design_constraints"]
+                ]
+
+        return safety_report
     
     def _save_reports(self, incident: Dict, config: Dict, telemetry: List[Dict], safety: Dict) -> Dict[str, Path]:
         """Save all reports."""

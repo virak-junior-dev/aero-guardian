@@ -74,6 +74,7 @@ class LLMInteractionLogger:
         self,
         signature_name: str,
         input_fields: Dict[str, Any],
+        model_name: Optional[str] = None,
     ) -> None:
         """
         Log the start of an LLM request.
@@ -92,12 +93,13 @@ class LLMInteractionLogger:
         }
         
         # Log to main log file
+        model_display = model_name or "unknown"
         self.logger.info(f"""
 ================================================================================
 LLM REQUEST START - {self.report_id}
 TIMESTAMP: {datetime.now().isoformat()}
 TYPE: generic
-model: gpt-4
+    model: {model_display}
 ================================================================================
 
 INPUT FIELDS:

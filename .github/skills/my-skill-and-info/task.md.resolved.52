@@ -1,0 +1,29 @@
+# AeroGuardian Evaluation Upgrades V2 - Task Breakdown
+
+## 1. Claude AI Migration (DSPy)
+- [x] Implement flexible LLM connector in [src/llm/llm_setup.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/llm/llm_setup.py) (Strategy Pattern factory).
+- [x] Default to Claude for current testing phase.
+- [x] Optimize DSPy Signatures to be universally robust for ALL models.
+
+## 2. Model-Specific DSPy Prompt Enhancers (NEW)
+- [ ] Create `src/llm/prompt_enhancers.py` with `BasePromptEnhancer`, `AnthropicEnhancer`, `OpenAIEnhancer`.
+- [ ] Add `get_provider()` utility to [llm_setup.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/llm/llm_setup.py).
+- [ ] Integrate enhancers into [scenario_generator.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/llm/scenario_generator.py) (LLM1).
+- [ ] Integrate enhancers into [report_generator.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/llm/report_generator.py) (LLM2).
+
+## 3. Dynamic UAV Model Configuration (PX4)
+- [x] Update [scenario_generator.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/llm/scenario_generator.py) DSPy signature to extract [uav_model](file:///C:/VIRAK/Python%20Code/aero-guardian/src/analysis/faa_analysis.py#327-362).
+- [x] Update [run_automated_pipeline.py](file:///C:/VIRAK/Python%20Code/aero-guardian/scripts/run_automated_pipeline.py) with `PX4_SYS_AUTOSTART` mapping.
+
+## 4. Architecture Cleanup & Telemetry
+- [x] Remove legacy code and emojis from logging.
+- [x] Ensure LLM2 receives both FAA narrative and MAVSDK metrics.
+
+## 5. RFlyMAD Validation & Metrics (3-Sigma Upgrade)
+- [x] Write [src/evaluation/rflymad_validation.py](file:///c:/VIRAK/Python%20Code/aero-guardian/src/evaluation/rflymad_validation.py) with real ALFA data.
+- [ ] Compute 3-sigma statistical baselines from ALFA normal flights.
+- [ ] Replace hardcoded thresholds with statistically derived bounds.
+- [ ] Add per-class F1 bar chart alongside confusion matrix.
+
+## 6. Final Architecture Documentation
+- [x] Generate updated Mermaid diagrams.

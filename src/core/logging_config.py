@@ -337,7 +337,7 @@ FULL RESPONSE:
         error_type = type(error).__name__
         
         # Console log
-        self.logger.error(f"❌ LLM Error #{call_id} | {error_type}: {error}")
+        self.logger.error(f">>>>> LLM Error #{call_id} | {error_type}: {error}")
         
         # File log (detailed)
         self._write_to_log(f"""
@@ -422,7 +422,7 @@ class DSPyLogger:
                         output_fields.append(field_info)
         
         # Console log
-        self.logger.info(f"🔧 DSPy Signature: {sig_name} | {len(input_fields)} inputs, {len(output_fields)} outputs")
+        self.logger.info(f">>>>> DSPy Signature: {sig_name} | {len(input_fields)} inputs, {len(output_fields)} outputs")
         
         # File log (detailed)
         docstring = signature_class.__doc__ or "No docstring"
@@ -585,7 +585,7 @@ def log_exception(
     timestamp = datetime.now().isoformat()
     
     # Console log
-    logger.error(f"❌ Exception [{error_type}]: {error}")
+    logger.error(f">>>>> Exception [{error_type}]: {error}")
     if context:
         logger.error(f"   Context: {context}")
     

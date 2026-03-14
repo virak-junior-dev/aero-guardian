@@ -1,0 +1,5 @@
+{
+  "artifactType":  "ARTIFACT_TYPE_OTHER",
+  "summary":  "Professional deep analysis of the FAA UAS Sighting Report dataset used in AeroGuardian. Examines all 31 confirmed failure records and 8,000 high-risk sightings. Includes: dataset provenance, column schema, fault-type distribution, hazard-category breakdown, UAV model identification, altitude analysis, PX4 Gazebo simulatability assessment, temporal distribution, comparison with Watters (2023) AIAA methodology, data quality issues found, and recommendations for DASC 2026 paper.",
+  "updatedAt":  "2026-03-10T10:07:01.255631900Z"
+}

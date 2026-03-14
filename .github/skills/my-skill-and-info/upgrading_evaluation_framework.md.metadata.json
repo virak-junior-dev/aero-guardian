@@ -1,0 +1,5 @@
+{
+  "artifactType": "ARTIFACT_TYPE_OTHER",
+  "summary": "A comprehensive document explaining how a deterministic threshold framework can calculate F1-scores without ML, detailing the FAA DO-178C standard, justifying the simulation of purely observational data, and proposing strict new metrics for LLM1 and LLM2, especially regarding actionable design constraints and telemetry-grounded recommendations.",
+  "updatedAt": "2026-03-12T07:32:52.344410400Z"
+}

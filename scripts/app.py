@@ -172,7 +172,7 @@ if uploaded_file:
         has_report_id = 'report_id' in rec or 'incident_id' in rec
         
         if has_description and has_report_id:
-            st.success(f"✓ Loaded: **{report_id}**")
+            st.success(f">>>>>  Loaded: **{report_id}**")
             
             # Show field status
             found_optional = [f for f in optional_fields if f in rec]
@@ -184,7 +184,7 @@ if uploaded_file:
                 missing.append('report_id')
             if not has_description:
                 missing.append('description or summary')
-            st.warning(f"⚠️ Missing required fields: {', '.join(missing)}")
+            st.warning(f">>>>> ️ Missing required fields: {', '.join(missing)}")
 
 # Step 2: Preview
 if st.session_state.all_records:
@@ -196,7 +196,7 @@ if st.session_state.all_records:
     st.markdown("### 3. Execution")
     
     # Run Button
-    if st.button("🚀 Start Pipeline Analysis", type="primary", disabled=st.session_state.processing):
+    if st.button(">>>>>  Start Pipeline Analysis", type="primary", disabled=st.session_state.processing):
         st.session_state.processing = True
         st.session_state.pipeline_results = None # Reset previous results
         
@@ -259,9 +259,9 @@ if st.session_state.all_records:
                 
             except Exception as e:
                 status.update(label="Pipeline Failed", state="error", expanded=True)
-                st.error(f"❌ Analysis Failed: {str(e)}")
+                st.error(f">>>>> Analysis Failed: {str(e)}")
                 
-                with st.expander("🔍 View Technical Details & Troubleshooting"):
+                with st.expander(">>>>> View Technical Details & Troubleshooting"):
                     st.info("Possible Causes:\n- WSL is not running or IP is incorrect.\n- PX4/Gazebo failed to launch.\n- OpenAI API key is missing or invalid.")
                     import traceback
                     st.code(traceback.format_exc())
@@ -277,7 +277,7 @@ if st.session_state.pipeline_results:
     # Show output directory path for manual inspection
     report_dir = paths.get("report_dir")
     if report_dir:
-        st.info(f"📁 **Output saved to:** `{report_dir}`")
+        st.info(f">>>>> **Output saved to:** `{report_dir}`")
         st.caption("All files are saved to disk. You can browse this folder to view input, output, reports, and evaluation files.")
     
     cols = st.columns(4)
@@ -288,7 +288,7 @@ if st.session_state.pipeline_results:
         if p and os.path.exists(p):
             with open(p, "rb") as f:
                 st.download_button(
-                    "📥 Generated Params", 
+                    ">>>>> Generated Params", 
                     f, 
                     file_name="simulation_config.json",
                     mime="application/json",
@@ -303,7 +303,7 @@ if st.session_state.pipeline_results:
         if p and os.path.exists(p):
             with open(p, "rb") as f:
                 st.download_button(
-                    "📥 Telemetry Data", 
+                    ">>>>> Telemetry Data", 
                     f, 
                     file_name="telemetry_log.json", 
                     mime="application/json",
@@ -318,7 +318,7 @@ if st.session_state.pipeline_results:
         if p and os.path.exists(p):
             with open(p, "rb") as f:
                 st.download_button(
-                    "📄 Safety Report (PDF)", 
+                    ">>>>> Safety Report (PDF)", 
                     f, 
                     file_name="safety_report.pdf", 
                     mime="application/pdf",
@@ -330,7 +330,7 @@ if st.session_state.pipeline_results:
             if p_json and os.path.exists(p_json):
                 with open(p_json, "rb") as f:
                     st.download_button(
-                        "📄 Safety Report (JSON)", 
+                        ">>>>> Safety Report (JSON)", 
                         f, 
                         file_name="safety_report.json", 
                         mime="application/json",
@@ -345,7 +345,7 @@ if st.session_state.pipeline_results:
         if p and os.path.exists(p):
             with open(p, "rb") as f:
                 st.download_button(
-                    "📊 Evaluation (XLSX)", 
+                    ">>>>> Evaluation (XLSX)", 
                     f, 
                     file_name="evaluation.xlsx", 
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -357,7 +357,7 @@ if st.session_state.pipeline_results:
             if p_eval_json and os.path.exists(p_eval_json):
                 with open(p_eval_json, "rb") as f:
                     st.download_button(
-                        "📊 Evaluation (JSON)", 
+                        ">>>>> Evaluation (JSON)", 
                         f, 
                         file_name="evaluation.json", 
                         mime="application/json",
@@ -367,7 +367,7 @@ if st.session_state.pipeline_results:
                 st.button("No Evaluation", disabled=True, use_container_width=True)
 
     # Show file structure for reference
-    with st.expander("📂 View Output File Structure"):
+    with st.expander(">>>>> View Output File Structure"):
         report_dir = paths.get("report_dir")
         if report_dir:
             dir_name = os.path.basename(report_dir)

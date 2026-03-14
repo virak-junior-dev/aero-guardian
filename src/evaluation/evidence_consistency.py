@@ -23,6 +23,7 @@ ECC = (supported_claims / total_claims) * evidence_strength
 """
 
 import logging
+import re
 from typing import Dict, List
 from dataclasses import dataclass, field
 
@@ -95,6 +96,41 @@ UNIVERSAL_SAFETY_KEYWORDS = [
     "termination",     # Flight termination
 ]
 
+# AGI strictness signals (Actionability and Grounding Index)
+SUBSYSTEM_KEYWORDS = {
+    "propulsion", "motor", "esc", "powertrain", "battery",
+    "attitude", "control", "autopilot", "imu", "rate controller",
+    "navigation", "gps", "position", "velocity", "altitude",
+    "communications", "telemetry", "link", "failsafe",
+}
+
+TESTABILITY_KEYWORDS = {
+    "verify", "validate", "test", "simulate", "reproduce", "checklist",
+    "pre-flight", "preflight", "monitor", "log", "threshold", "trigger",
+}
+
+CONTRADICTION_PATTERNS = [
+    "ignore",
+    "continue flight",
+    "disable failsafe",
+    "override safety",
+    "no action needed",
+]
+
+GENERIC_NON_ACTIONABLE_PATTERNS = [
+    "improve reliability",
+    "enhance safety",
+    "be careful",
+    "take precautions",
+    "monitor closely",
+    "follow procedures",
+]
+
+NUMERIC_ACTION_PATTERN = re.compile(
+    r"(>=|<=|>|<|=)?\s*\d+(?:\.\d+)?\s*(%|deg|degree|degrees|m|meter|meters|s|sec|seconds|hz|v|a|mah)?",
+    re.IGNORECASE,
+)
+
 
 @dataclass
 class ClaimVerification:
@@ -104,6 +140,8 @@ class ClaimVerification:
     is_supported: bool = False  # Default to False
     supporting_evidence: List[str] = field(default_factory=list)
     confidence: float = 0.0
+    agi_components: Dict[str, float] = field(default_factory=dict)
+    penalties: List[str] = field(default_factory=list)
     
     def to_dict(self) -> Dict:
         return {
@@ -112,6 +150,8 @@ class ClaimVerification:
             "is_supported": self.is_supported,
             "supporting_evidence": self.supporting_evidence,
             "confidence": round(self.confidence, 3),
+            "agi_components": {k: round(v, 3) for k, v in self.agi_components.items()},
+            "penalties": self.penalties,
         }
 
 
@@ -122,6 +162,8 @@ class ECCResult:
     verified_claims: List[ClaimVerification] = field(default_factory=list)
     unsupported_claims: List[str] = field(default_factory=list)
     evidence_strength: float = 0.0
+    agi_score: float = 0.0
+    agi_summary: Dict = field(default_factory=dict)
     total_claims: int = 0
     supported_claims: int = 0
     confidence: str = "LOW"
@@ -132,6 +174,8 @@ class ECCResult:
             "verified_claims": [c.to_dict() for c in self.verified_claims],
             "unsupported_claims": self.unsupported_claims,
             "evidence_strength": round(self.evidence_strength, 3),
+            "AGI": round(self.agi_score, 3),
+            "agi_summary": self.agi_summary,
             "total_claims": self.total_claims,
             "supported_claims": self.supported_claims,
             "confidence": self.confidence,
@@ -199,6 +243,9 @@ class EvidenceConsistencyChecker:
             anomaly_types
         )
         result.verified_claims.extend(constraint_claims)
+
+        # 4b. Compute AGI strictness summary from recommendation/constraint claims
+        result.agi_score, result.agi_summary = self._compute_agi_summary(result.verified_claims)
         
         # 5. Verify causal consistency (NEW - for research-level diagnosis)
         # Check if primary_failure_subsystem matches the earliest detected anomaly
@@ -287,8 +334,10 @@ class EvidenceConsistencyChecker:
         """Verify primary hazard claim is supported by telemetry."""
         
         # Extract primary hazard from report
+        section_1 = safety_report.get("section_1_safety_level_and_cause", {})
         primary_hazard = (
             safety_report.get("primary_hazard") or
+            section_1.get("primary_hazard") or
             safety_report.get("hazard_type", "Unknown")
         )
         
@@ -347,8 +396,15 @@ class EvidenceConsistencyChecker:
         
         claims = []
         
-        # Get recommendations from report
-        recommendations = safety_report.get("recommendations", [])
+        # Get recommendations from report.
+        # Support both legacy top-level and structured section_2 format.
+        section_2 = safety_report.get("section_2_design_constraints_and_recommendations", {})
+        recommendations = (
+            safety_report.get("recommendations")
+            or safety_report.get("safety_recommendations")
+            or section_2.get("recommendations")
+            or []
+        )
         if isinstance(recommendations, str):
             recommendations = [r.strip() for r in recommendations.split("|")]
         
@@ -373,6 +429,26 @@ class EvidenceConsistencyChecker:
                             break
                     if claim.is_supported:
                         break
+
+            # AGI strictness scoring enforces actionability and telemetry grounding.
+            agi = self._score_actionability_grounding(rec, anomaly_types)
+            claim.agi_components = {
+                "G1_subsystem_grounding": agi["g1"],
+                "G2_numeric_actionability": agi["g2"],
+                "G3_telemetry_causal_link": agi["g3"],
+                "G4_testability": agi["g4"],
+                "AGI_claim": agi["score"],
+            }
+            claim.penalties.extend(agi["penalties"])
+            claim.supporting_evidence.extend(agi["supporting_evidence"])
+            claim.confidence = min(claim.confidence, agi["score"]) if claim.confidence else agi["score"]
+
+            if agi["score"] < 0.65:
+                claim.is_supported = False
+            elif claim.is_supported:
+                claim.is_supported = True
+            else:
+                claim.is_supported = True
             
             # Check for universal safety recommendations (valid for ANY critical/high failure)
             # TIGHTENED 2026-02-04: Require 2+ matches for high confidence
@@ -401,9 +477,9 @@ class EvidenceConsistencyChecker:
             if not claim.is_supported:
                 safety_words = ["check", "inspect", "monitor", "limit", "ensure", "verify"]
                 if any(w in rec_lower for w in safety_words):
-                    claim.is_supported = True
-                    claim.confidence = 0.4
-                    claim.supporting_evidence.append("Generic safety measure")
+                    claim.confidence = min(claim.confidence, 0.4) if claim.confidence else 0.4
+                    claim.penalties.append("generic_non_actionable_recommendation")
+                    claim.supporting_evidence.append("Generic safety measure (penalized by AGI strictness)")
             
             claims.append(claim)
         
@@ -418,7 +494,12 @@ class EvidenceConsistencyChecker:
         
         claims = []
         
-        constraints = safety_report.get("design_constraints", [])
+        section_2 = safety_report.get("section_2_design_constraints_and_recommendations", {})
+        constraints = (
+            safety_report.get("design_constraints")
+            or section_2.get("design_constraints")
+            or []
+        )
         if isinstance(constraints, str):
             constraints = [c.strip() for c in constraints.split("|")]
         
@@ -448,6 +529,21 @@ class EvidenceConsistencyChecker:
                 claim.is_supported = True
                 claim.confidence = 0.5
                 claim.supporting_evidence.append("Constraint exists with anomalies")
+
+            agi = self._score_actionability_grounding(constraint, anomaly_types)
+            claim.agi_components = {
+                "G1_subsystem_grounding": agi["g1"],
+                "G2_numeric_actionability": agi["g2"],
+                "G3_telemetry_causal_link": agi["g3"],
+                "G4_testability": agi["g4"],
+                "AGI_claim": agi["score"],
+            }
+            claim.penalties.extend(agi["penalties"])
+            claim.supporting_evidence.extend(agi["supporting_evidence"])
+            claim.confidence = min(claim.confidence, agi["score"]) if claim.confidence else agi["score"]
+
+            if agi["score"] < 0.6:
+                claim.is_supported = False
             
             claims.append(claim)
         
@@ -473,8 +569,10 @@ class EvidenceConsistencyChecker:
             ClaimVerification or None if no causal claim to verify
         """
         # Check if report has causal fields to verify
+        section_1 = safety_report.get("section_1_safety_level_and_cause", {})
         claimed_subsystem = (
             safety_report.get("primary_failure_subsystem") or
+            section_1.get("root_cause_subsystem") or
             safety_report.get("causal_analysis", {}).get("primary_failure_subsystem")
         )
         
@@ -599,6 +697,106 @@ class EvidenceConsistencyChecker:
         data_bonus = 0.2 if data_points > 500 else (0.1 if data_points > 100 else 0.0)
         
         return min(base_strength + severity_bonus + data_bonus, 1.0)
+
+    def _score_actionability_grounding(self, text: str, anomaly_types: List[str]) -> Dict:
+        """
+        Score one claim using AGI-style strictness checks.
+
+        G1: subsystem specificity
+        G2: measurable numeric criterion
+        G3: telemetry/anomaly causal grounding
+        G4: testability/verifiability
+        """
+        text_lower = (text or "").lower()
+        penalties: List[str] = []
+        supporting_evidence: List[str] = []
+
+        # G1: subsystem specificity
+        matched_subsystems = [k for k in SUBSYSTEM_KEYWORDS if k in text_lower]
+        g1 = 1.0 if matched_subsystems else 0.0
+        if matched_subsystems:
+            supporting_evidence.append(f"Subsystem specificity: {', '.join(matched_subsystems[:2])}")
+        else:
+            penalties.append("missing_subsystem_specificity")
+
+        # G2: measurable threshold/action criterion
+        numeric_hits = NUMERIC_ACTION_PATTERN.findall(text)
+        g2 = 1.0 if numeric_hits else 0.0
+        if numeric_hits:
+            supporting_evidence.append("Contains measurable numeric criterion")
+        else:
+            penalties.append("missing_numeric_actionability")
+
+        # G3: causal grounding against detected anomalies
+        anomaly_types_lower = [a.lower() for a in anomaly_types if a]
+        grounded = False
+        for keyword, expected_anomalies in HAZARD_KEYWORDS.items():
+            if keyword in text_lower:
+                if any(exp.lower() in anomaly_types_lower for exp in expected_anomalies):
+                    grounded = True
+                    supporting_evidence.append(f"Telemetry causal link via '{keyword}'")
+                    break
+        g3 = 1.0 if grounded else (0.4 if anomaly_types_lower else 0.5)
+        if not grounded:
+            penalties.append("missing_telemetry_causal_link")
+
+        # G4: verifiability
+        testability_hits = [k for k in TESTABILITY_KEYWORDS if k in text_lower]
+        g4 = 1.0 if testability_hits else 0.0
+        if testability_hits:
+            supporting_evidence.append(f"Testability cue: {testability_hits[0]}")
+        else:
+            penalties.append("missing_testability")
+
+        contradiction = any(p in text_lower for p in CONTRADICTION_PATTERNS) and bool(anomaly_types_lower)
+        if contradiction:
+            penalties.append("safety_contradiction")
+            supporting_evidence.append("Contradiction with active anomaly context")
+            score = 0.0
+        else:
+            score = (0.30 * g1) + (0.25 * g2) + (0.30 * g3) + (0.15 * g4)
+
+        # Hard penalty for vague guidance with no operational content.
+        is_generic = any(p in text_lower for p in GENERIC_NON_ACTIONABLE_PATTERNS)
+        if is_generic and score > 0.0:
+            penalties.append("generic_non_actionable_language")
+            score = min(score, 0.45)
+
+        return {
+            "g1": g1,
+            "g2": g2,
+            "g3": g3,
+            "g4": g4,
+            "score": score,
+            "penalties": penalties,
+            "supporting_evidence": supporting_evidence,
+        }
+
+    def _compute_agi_summary(self, claims: List[ClaimVerification]) -> tuple[float, Dict]:
+        """Aggregate AGI from recommendation and design-constraint claims."""
+        scoped_claims = [
+            c for c in claims if c.claim_type in ("recommendation", "design_constraint")
+        ]
+        if not scoped_claims:
+            return 0.0, {
+                "claim_count": 0,
+                "penalties": {},
+                "note": "No recommendation/design_constraint claims available for AGI scoring",
+            }
+
+        agi_values = []
+        penalty_counts: Dict[str, int] = {}
+        for claim in scoped_claims:
+            agi_values.append(claim.agi_components.get("AGI_claim", 0.0))
+            for penalty in claim.penalties:
+                penalty_counts[penalty] = penalty_counts.get(penalty, 0) + 1
+
+        agi_score = sum(agi_values) / len(agi_values)
+        return agi_score, {
+            "claim_count": len(scoped_claims),
+            "penalties": penalty_counts,
+            "strict_support_threshold": 0.65,
+        }
     
     def _compute_confidence(self, result: ECCResult) -> str:
         """Compute confidence level."""
@@ -608,9 +806,9 @@ class EvidenceConsistencyChecker:
         
         support_rate = result.supported_claims / result.total_claims
         
-        if support_rate >= 0.8 and result.evidence_strength >= 0.7:
+        if support_rate >= 0.8 and result.evidence_strength >= 0.7 and result.agi_score >= 0.7:
             return "HIGH"
-        elif support_rate >= 0.5 and result.evidence_strength >= 0.5:
+        elif support_rate >= 0.5 and result.evidence_strength >= 0.5 and result.agi_score >= 0.5:
             return "MEDIUM"
         else:
             return "LOW"

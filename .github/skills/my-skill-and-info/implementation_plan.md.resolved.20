@@ -1,0 +1,99 @@
+# Implementation Plan V2: Model-Specific DSPy Strategy & Evaluation Hardening
+
+## Goal
+
+Complete all remaining work items from the confirmed methodology. The two critical gaps identified from the deep codebase review are:
+
+1. **DSPy Signatures have no model-specific tricks yet** — the implementation plan explicitly called for a Strategy Pattern with per-model optimizations, but the current [signatures.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/llm/signatures.py) uses only universal rules.
+2. **RFlyMAD validation thresholds are not statistically grounded** — [methodology_enhancement_plan.md](file:///C:/Users/User/.gemini/antigravity/brain/23212d1f-8f58-4197-97cd-12b317768cd9/methodology_enhancement_plan.md) confirmed we must derive thresholds from 3-sigma (Z-score) bounds of the ALFA normal flight distribution, not arbitrary constants.
+
+## User Review Required
+
+> [!IMPORTANT]
+> **Model-Specific Tricks vs Universal: Which is better?**
+> 
+> **Answer: Model-specific tricks are superior**, and here is the engineering proof:
+> 
+> | | Universal Only | Model-Specific |
+> |---|---|---|
+> | Claude XML `<thinking>` blocks | Not used | Exploits Claude's native XML reasoning |
+> | OpenAI `response_format: json` | Not used | Strict JSON mode eliminates parse errors |
+> | Claude negative constraints | Generic "do not" | `<forbidden>` XML blocks Claude respects deeply |
+> | OpenAI system role strictness | Shared docstring | Dedicated system prompt with function-call style |
+> | DSPy compatibility | Works everywhere | Works everywhere (tricks are additive, not breaking) |
+> 
+> **The design: Both approaches coexist.** A universal base signature provides the safety net (works with any model). Model-specific "prompt enhancers" are injected at runtime when the provider is detected. If you switch to a new model (e.g., Gemini), it falls back to universal automatically.
+
+## Proposed Changes
+
+### 1. Model-Specific DSPy Prompt Enhancers (NEW)
+
+#### [NEW] [prompt_enhancers.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/llm/prompt_enhancers.py)
+
+A new module implementing the Strategy Pattern for model-specific DSPy prompt optimization.
+
+- **`BasePromptEnhancer`**: Abstract base class with `enhance_scenario_prompt()` and `enhance_report_prompt()`.
+- **`AnthropicEnhancer`**: Injects Claude-optimized tricks:
+  - `<thinking>` XML blocks for chain-of-thought reasoning
+  - `<forbidden>` XML blocks listing prohibited outputs (hallucination guard)
+  - `<output_rules>` XML blocks enforcing ENUM validation
+  - Negative constraint lists ("You must NEVER output...")
+- **`OpenAIEnhancer`**: Injects OpenAI-optimized tricks:
+  - System-role strictness preamble
+  - `response_format: { type: "json_object" }` hint in prompt
+  - Few-shot exemplar formatting optimized for GPT tokenizer
+  - Function-call style output schema enforcement
+- **`get_enhancer(provider: str)`**: Factory function that returns the correct enhancer based on `LLM_PROVIDER` env var. Falls back to `BasePromptEnhancer` (universal/no-op) for unknown providers.
+
+---
+
+#### [MODIFY] [llm_setup.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/llm/llm_setup.py)
+
+- Add `get_provider() -> str` utility function so other modules can detect the active provider without re-reading env vars.
+- Clean up the `LLMClient.__init__` in [client.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/llm/client.py) which still references `OPENAI_MODEL` hardcoded default.
+
+---
+
+#### [MODIFY] [scenario_generator.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/llm/scenario_generator.py)
+
+- In [_configure()](file:///C:/VIRAK/Python%20Code/aero-guardian/src/llm/report_generator.py#96-120), call `get_enhancer()` to load the model-specific enhancer.
+- Before each DSPy call, invoke `enhancer.enhance_scenario_prompt(faa_text)` to prepend the model-specific prompt prefix.
+- The enhanced prompt is passed as a `dspy.InputField` override or context injection.
+
+---
+
+#### [MODIFY] [report_generator.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/llm/report_generator.py)
+
+- Same pattern: call `enhancer.enhance_report_prompt(telemetry_summary)` before the DSPy call to LLM2.
+
+---
+
+### 2. RFlyMAD 3-Sigma Statistical Grounding
+
+#### [MODIFY] [rflymad_validation.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/evaluation/rflymad_validation.py)
+
+- **Compute baseline statistics from ALFA normal flights**: Calculate mean (mu) and standard deviation (sigma) for `gyro_x`, `gyro_y`, `gyro_z`, `vel_x`, `vel_y`, `vel_z` from windows where `is_fault == 0`.
+- **Replace hardcoded thresholds with 3-sigma bounds**: `threshold = mu + 3 * sigma`. This fulfills the methodology enhancement plan's commitment to "cite that we processed the RFlyMAD normal flight dataset to find mu and sigma".
+- **Add bar chart of per-class F1 scores** alongside the confusion matrix.
+- **Fix typo**: "Matrics" → "Metrics" on line 196.
+
+---
+
+### 3. Remaining Task Completion
+
+#### [MODIFY] [run_automated_pipeline.py](file:///C:/VIRAK/Python%20Code/aero-guardian/scripts/run_automated_pipeline.py)
+
+- Verify the [start_px4_gazebo(uav_model)](file:///C:/VIRAK/Python%20Code/aero-guardian/scripts/run_automated_pipeline.py#154-277) integration works end-to-end with the `PX4_SYS_AUTOSTART` mapping from task item 2.
+
+---
+
+## Verification Plan
+
+### Automated Tests
+1. `.\venv\Scripts\Activate.ps1; python -c "from src.llm.prompt_enhancers import get_enhancer; e = get_enhancer('anthropic'); print(e.enhance_scenario_prompt('test'))"` — Verify Claude enhancer returns XML-tagged prompt.
+2. `.\venv\Scripts\Activate.ps1; python -c "from src.llm.prompt_enhancers import get_enhancer; e = get_enhancer('openai'); print(e.enhance_report_prompt('test'))"` — Verify OpenAI enhancer returns JSON-schema prompt.
+3. `.\venv\Scripts\Activate.ps1; python src/evaluation/rflymad_validation.py` — Verify 3-sigma thresholds produce improved F1 on real ALFA data.
+
+### Manual Verification
+- Inspect the confusion matrix PNG for correct class distribution.
+- Verify switching `LLM_PROVIDER` between `anthropic` and `openai` in `.env` changes the prompt enhancement strategy without breaking the DSPy pipeline.

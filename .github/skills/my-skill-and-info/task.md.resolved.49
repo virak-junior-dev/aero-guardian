@@ -1,0 +1,25 @@
+# AeroGuardian Evaluation Upgrades - Task Breakdown
+
+## 1. Claude AI Migration (DSPy)
+- [x] Locate current OpenAI DSPy setup in the codebase.
+- [x] Implement a flexible LLM connector in [src/llm/llm_setup.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/llm/llm_setup.py) that allows easy switching between `dspy.Anthropic` (Claude) and `dspy.OpenAI`.
+- [x] Default to Claude for the current testing phase (commenting out OpenAI to save credits).
+- [x] Optimize DSPy Signatures and prompting rules to be globally robust for ALL leading models (clear definitions, strict output formatting, few-shot examples).
+
+## 2. Dynamic UAV Model Configuration (PX4)
+- [x] Verify standard PX4 SITL airframes available (e.g., `iris`, `standard_vtol`, `plane`).
+- [x] Update [scenario_generator.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/llm/scenario_generator.py) DSPy signature to extract the "UAV Airframe Type".
+- [ ] Update [run_automated_pipeline.py](file:///C:/VIRAK/Python%20Code/aero-guardian/scripts/run_automated_pipeline.py) to dynamically pass `PX4_SYS_AUTOSTART` values to the simulator.
+
+## 3. Architecture Cleanup & Telemetry
+- [x] Remove legacy or unused code related to old `.ulg` parsing or outdated ML attempts (if any remain outside the archived folders).
+- [x] Update evaluation scripts to explicitly parse MAVSDK JSON output.
+- [x] Ensure LLM2 ([unified_reporter.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/reporting/unified_reporter.py)) receives both the original FAA unstructured text and the MAVSDK metrics.
+
+## 4. RFlyMAD Validation & Metrics
+- [ ] Write `src/evaluation/rflymad_validation.py`.
+- [ ] Calculate Precision, Recall, Accuracy, and F1-Score deterministically (No Scikit-Learn `predict()`).
+- [ ] Generate Confusion Matrix plots using `matplotlib` and `seaborn`.
+
+## 5. Final Architecture Documentation
+- [ ] Generate an updated end-to-end Mermaid diagram reflecting the Model-Agnostic architecture, JSON telemetry, and the advanced AGI/CSR evaluation rules, including extreme sub-step detail and a real-world example from zero to end.

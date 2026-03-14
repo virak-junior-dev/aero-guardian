@@ -31,14 +31,14 @@ class SightingFilter:
         
         Args:
             data_path: Path to the FAA sightings JSON file.
-            data_source: 'sightings' (8000 high-risk) or 'failures' (31 confirmed crashes)
+            data_source: 'sightings' (high-risk sightings) or 'failures' (actual failures)
         """
         if data_path:
             self.data_path = data_path
         elif data_source == "failures":
-            self.data_path = Path("data/processed/faa_reports/faa_actual_failures.json")
+            self.data_path = Path("data/new_data/faa/faa_actual_failures.json")
         else:
-            self.data_path = Path("data/processed/faa_reports/faa_high_risk_sightings.json")
+            self.data_path = Path("data/new_data/faa/faa_high_risk_sightings.json")
         self._sightings: List[Dict] = []
     
     def load(self) -> int:
@@ -72,16 +72,16 @@ class SightingFilter:
                 desc_parts.append(inc.get("summary"))
             full_description = " ".join(desc_parts)
             
-            # Create simplified report object
+            # Create simplified raw-only report object
             report = {
                 "report_id": report_id,
                 "description": full_description,
                 "date": inc.get("date", ""),
                 "city": inc.get("city", ""),
                 "state": inc.get("state", ""),
-                # Preserve pre-classified fault data if available
-                "fault_type": inc.get("fault_type", ""),
-                "hazard_category": inc.get("hazard_category", ""),
+                "altitude_m": inc.get("altitude_m", None),
+                "source_file": inc.get("source_file", ""),
+                "source_row_index": inc.get("source_row_index", None),
             }
             self._sightings.append(report)
             

@@ -1,0 +1,25 @@
+# AeroGuardian Evaluation Upgrades - Task Breakdown
+
+## 1. Claude AI Migration (DSPy)
+- [ ] Locate current OpenAI DSPy setup in the codebase.
+- [ ] Comment out `dspy.OpenAI` configuration.
+- [ ] Implement and test `dspy.Anthropic` or `dspy.Claude` connector.
+- [ ] Optimize DSPy Signatures and prompting rules for Claude's specific instruction-following strengths.
+
+## 2. Dynamic UAV Model Configuration (PX4)
+- [ ] Verify standard PX4 SITL airframes available (e.g., `iris`, `standard_vtol`, `plane`).
+- [ ] Update [scenario_generator.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/llm/scenario_generator.py) DSPy signature to extract the "UAV Airframe Type".
+- [ ] Update [run_automated_pipeline.py](file:///C:/VIRAK/Python%20Code/aero-guardian/scripts/run_automated_pipeline.py) to dynamically pass `PX4_SYS_AUTOSTART` values to the simulator.
+
+## 3. Architecture Cleanup & Telemetry
+- [ ] Remove legacy or unused code related to old `.ulg` parsing or outdated ML attempts (if any remain outside the archived folders).
+- [ ] Update evaluation scripts to explicitly parse MAVSDK JSON output.
+- [ ] Ensure LLM2 ([unified_reporter.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/reporting/unified_reporter.py)) receives both the original FAA unstructured text and the MAVSDK metrics.
+
+## 4. RFlyMAD Validation & Metrics
+- [ ] Write `src/evaluation/rflymad_validation.py`.
+- [ ] Calculate Precision, Recall, Accuracy, and F1-Score deterministically (No Scikit-Learn `predict()`).
+- [ ] Generate Confusion Matrix plots using `matplotlib` and `seaborn`.
+
+## 5. Final Architecture Documentation
+- [ ] Generate an updated end-to-end Mermaid diagram reflecting Claude, JSON telemetry, and the advanced evaluation rules.

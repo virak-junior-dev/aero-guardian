@@ -228,18 +228,18 @@ class FailureEmulator:
         category = self._classify_fault_type(fault_type)
         severity = self.randomizer.randomize_severity(severity)
         
-        logger.info(f"🔧 Emulating {category.value} failure (severity: {severity:.2f})")
+        logger.info(f">>>>> Emulating {category.value} failure (severity: {severity:.2f})")
         if parachute_trigger:
-            logger.info("    🪂 Parachute deployment requested")
+            logger.info("    >>>>> Parachute deployment requested")
         
         # Special handling for control failures with parachute
         if category == FailureCategory.CONTROL and parachute_trigger:
             try:
                 result = await self._emulate_control_instability(severity, parachute_trigger=True)
-                logger.info(f"✅ Failure emulation complete: {result.method}")
+                logger.info(f">>>>> Failure emulation complete: {result.method}")
                 return result
             except Exception as e:
-                logger.error(f"❌ Failure emulation failed: {e}")
+                logger.error(f">>>>> Failure emulation failed: {e}")
                 return EmulationResult(
                     success=False,
                     category=category,
@@ -264,10 +264,10 @@ class FailureEmulator:
         
         try:
             result = await handler(severity)
-            logger.info(f"✅ Failure emulation complete: {result.method}")
+            logger.info(f">>>>> Failure emulation complete: {result.method}")
             return result
         except Exception as e:
-            logger.error(f"❌ Failure emulation failed: {e}")
+            logger.error(f">>>>> Failure emulation failed: {e}")
             return EmulationResult(
                 success=False,
                 category=category,

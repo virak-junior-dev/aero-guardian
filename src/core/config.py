@@ -59,6 +59,9 @@ class Config:
     Application configuration with type-safe access to environment variables.
     
     Attributes:
+        llm_provider: Active provider (anthropic|openai|claude alias)
+        anthropic_api_key: Anthropic API key for LLM calls
+        anthropic_model: Anthropic model name
         openai_api_key: OpenAI API key for LLM calls
         openai_model: Model to use (default: gpt-4o)
         openai_temperature: Sampling temperature (default: 0.1)
@@ -67,7 +70,12 @@ class Config:
         log_level: Logging verbosity level
         project_root: Path to project root directory
     """
-    openai_api_key: str
+    llm_provider: str = "anthropic"
+    anthropic_api_key: str = ""
+    anthropic_model: str = "claude-sonnet-4-5-20250929"
+    anthropic_temperature: float = 0.1
+    anthropic_max_tokens: int = 4096
+    openai_api_key: str = ""
     openai_model: str = "gpt-4o"
     openai_temperature: float = 0.1
     openai_max_tokens: int = 4096
@@ -77,12 +85,41 @@ class Config:
     
     def __post_init__(self):
         """Validate configuration after initialization."""
-        if not self.openai_api_key:
-            logger.error(
-                "OPENAI_API_KEY not configured. LLM features will not work. "
-                "Please set OPENAI_API_KEY in .env file."
-            )
-            raise Exception("OPENAI_API_KEY not configured. Please set OPENAI_API_KEY in .env file.")
+        provider = str(self.llm_provider or "anthropic").strip().lower()
+        if provider == "claude":
+            provider = "anthropic"
+            self.llm_provider = "anthropic"
+
+        if provider not in {"anthropic", "openai"}:
+            raise Exception("LLM_PROVIDER invalid. Use 'anthropic', 'claude', or 'openai'.")
+
+        if provider == "anthropic":
+            if not self.anthropic_api_key and not self.openai_api_key:
+                logger.error(
+                    "ANTHROPIC_API_KEY not configured and OPENAI_API_KEY fallback unavailable. "
+                    "LLM features will not work."
+                )
+                raise Exception(
+                    "ANTHROPIC_API_KEY not configured and OPENAI_API_KEY fallback unavailable."
+                )
+            if not self.anthropic_api_key and self.openai_api_key:
+                logger.warning(
+                    "LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is empty. OpenAI fallback may be used by runtime."
+                )
+
+        if provider == "openai":
+            if not self.openai_api_key and not self.anthropic_api_key:
+                logger.error(
+                    "OPENAI_API_KEY not configured and ANTHROPIC_API_KEY fallback unavailable. "
+                    "LLM features will not work."
+                )
+                raise Exception(
+                    "OPENAI_API_KEY not configured and ANTHROPIC_API_KEY fallback unavailable."
+                )
+            if not self.openai_api_key and self.anthropic_api_key:
+                logger.warning(
+                    "LLM_PROVIDER=openai but OPENAI_API_KEY is empty. Anthropic fallback may be used by runtime."
+                )
     
     def get_data_path(self, *parts: str) -> Path:
         """
@@ -158,6 +195,11 @@ def get_config(reload: bool = False) -> Config:
         
         # Create config from environment variables
         _config = Config(
+            llm_provider=os.getenv("LLM_PROVIDER", "anthropic"),
+            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
+            anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929"),
+            anthropic_temperature=float(os.getenv("ANTHROPIC_TEMPERATURE", "0.1")),
+            anthropic_max_tokens=int(os.getenv("ANTHROPIC_MAX_TOKENS", "4096")),
             openai_api_key=os.getenv("OPENAI_API_KEY", ""),
             openai_model=os.getenv("OPENAI_MODEL", "gpt-4o"),
             openai_temperature=float(os.getenv("OPENAI_TEMPERATURE", "0.1")),
@@ -184,6 +226,11 @@ def get_openai_api_key() -> str:
     return get_config().openai_api_key
 
 
+def get_active_provider() -> str:
+    """Get configured LLM provider."""
+    return get_config().llm_provider
+
+
 def get_project_root() -> Path:
     """Get project root path."""
     return PROJECT_ROOT
@@ -201,9 +248,12 @@ if __name__ == "__main__":
     print("AeroGuardian Configuration")
     print("=" * 60)
     print(f"Project Root: {config.project_root}")
+    print(f"LLM Provider: {config.llm_provider}")
+    print(f"Anthropic Model: {config.anthropic_model}")
     print(f"OpenAI Model: {config.openai_model}")
     print(f"OpenAI Temperature: {config.openai_temperature}")
     print(f"Embedding Model: {config.embedding_model}")
     print(f"Log Level: {config.log_level}")
-    print(f"API Key Set: {'Yes' if config.openai_api_key else 'No'}")
+    print(f"Anthropic Key Set: {'Yes' if config.anthropic_api_key else 'No'}")
+    print(f"OpenAI Key Set: {'Yes' if config.openai_api_key else 'No'}")
     print("=" * 60)

@@ -80,10 +80,17 @@ class LLMClient:
         Initialize LLM client.
         
         Args:
-            model: OpenAI model name (default: from OPENAI_MODEL env var)
+            model: Optional explicit model override (otherwise resolved from active provider env)
             output_dir: Output directory for LLM logging (optional)
         """
-        self.model = model or os.getenv("OPENAI_MODEL", "gpt-4o")
+        if model:
+            self.model = model
+        else:
+            try:
+                from .llm_setup import get_llm_runtime_config
+                self.model = get_llm_runtime_config().get("model", "unknown")
+            except Exception:
+                self.model = os.getenv("OPENAI_MODEL", "gpt-4o")
         self._output_dir = output_dir
         self._scenario_generator: Optional[ScenarioGenerator] = None
         self._report_generator: Optional[ReportGenerator] = None
@@ -120,8 +127,14 @@ class LLMClient:
     @property
     def is_ready(self) -> bool:
         """Check if client is ready for LLM calls."""
-        return bool(os.getenv("OPENAI_API_KEY"))
-    
+        try:
+            from .llm_setup import get_llm_runtime_config
+            cfg = get_llm_runtime_config()
+            return cfg.get("api_key_set") == "yes"
+        except Exception:
+            # Conservative fallback for legacy behavior.
+            return bool(os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY"))
+
     def generate_scenario_config(self, faa_report: Any, report_id: str = "UNKNOWN") -> dict:
         """
         Generate PX4 configuration from an FAA report object.
@@ -133,13 +146,34 @@ class LLMClient:
         Returns:
             Dictionary with PX4 mission configuration
         """
-        # Extract text description
+        # Build raw-only payload: narrative + raw metadata only.
         if isinstance(faa_report, dict):
-            report_text = faa_report.get("description", faa_report.get("summary", ""))
-            incident_type = faa_report.get("incident_type", "unknown")
-            location = f"{faa_report.get('city', 'Unknown')}, {faa_report.get('state', '')}"
+            description = str(faa_report.get("description", faa_report.get("summary", "")) or "")
+            city = str(faa_report.get("city", "") or "")
+            state = str(faa_report.get("state", "") or "")
+            date = str(faa_report.get("date", "") or "")
+
+            incident_type = "unknown"
+            location = "Unknown Location"
+            report_text = "\n".join(
+                [
+                    f"Report ID: {report_id}",
+                    f"Date: {date}",
+                    f"City: {city}",
+                    f"State: {state}",
+                    f"Description: {description}",
+                ]
+            )
         else:
-            report_text = str(faa_report)
+            report_text = "\n".join(
+                [
+                    f"Report ID: {report_id}",
+                    "Date: ",
+                    "City: ",
+                    "State: ",
+                    f"Description: {str(faa_report)}",
+                ]
+            )
             incident_type = "unknown"
             location = "Unknown Location"
         
@@ -177,16 +211,32 @@ class LLMClient:
         Raises:
             ReportGenerationError on failure
         """
+        # Preserve additional pipeline context passed by callers.
+        incident_date = kwargs.get("incident_date")
+        simulation_params = kwargs.get("simulation_params")
+
+        enriched_incident_description = incident_description
+        if incident_date:
+            enriched_incident_description = (
+                f"{incident_description}\n\nIncident Date: {incident_date}"
+            )
+
+        enriched_telemetry_summary = telemetry_summary
+        if simulation_params:
+            enriched_telemetry_summary = (
+                f"{telemetry_summary}\n\n=== SIMULATION PARAMETERS ===\n{simulation_params}"
+            )
+
         self._call_count += 1
-        logger.info(f"🔄 LLM Call #{self._call_count}: generate_safety_report")
+        logger.info(f">>>>> LLM Call #{self._call_count}: generate_safety_report")
         
         report = self.report_generator.generate(
-            incident_description=incident_description,
+            incident_description=enriched_incident_description,
             report_id=report_id,
             incident_location=incident_location,
             fault_type=fault_type,
             expected_outcome=expected_outcome,
-            telemetry_summary=telemetry_summary,
+            telemetry_summary=enriched_telemetry_summary,
         )
         
         # Convert to dict format expected by pipeline
@@ -241,15 +291,13 @@ class LLMClient:
             - mission (waypoints, altitude, speed)
             - fault_injection (type, timing, severity)
             - environment (wind, weather)
-            - px4_commands (shell commands)
+            - runtime fault injection metadata
         """
         self._call_count += 1
-        logger.info(f"🔄 LLM Call #{self._call_count}: generate_full_px4_config")
+        logger.info(f">>>>> LLM Call #{self._call_count}: generate_full_px4_config")
 
-        if incident_type and incident_type.lower() not in ["unknown", "other", "uas incident", "none"]:
-            faa_report_text = f"Location: {incident_location}\nType: {incident_type}\nDescription: {incident_description}"
-        else:
-            faa_report_text = f"Location: {incident_location}\nDescription: {incident_description}"
+        # Raw-only policy: pass through pre-built payload without derived hints.
+        faa_report_text = str(incident_description)
             
         final_id = report_id or f"FAA-{str(incident_type).upper()}"
         
@@ -259,6 +307,8 @@ class LLMClient:
         
         # 2. Convert to dict format expected by pipeline
         # (Restoring logic that was accidentally removed)
+        fault_marker = "mavsdk_emulation" if config.fault_injection_supported else "behavioral_only"
+        fault_severity = self._derive_fault_severity(config.failure_category)
         return {
             "mission": {
                 "start_lat": config.lat,
@@ -272,7 +322,12 @@ class LLMClient:
             "fault_injection": {
                 "fault_type": config.failure_mode,
                 "fault_category": config.failure_category,
+                "fault_severity": fault_severity,
                 "onset_sec": config.failure_onset_sec,
+                "trigger": {
+                    "type": "time_elapsed_sec",
+                    "value": config.failure_onset_sec,
+                },
                 "duration_sec": -1,  # Permanent
                 "affected_components": [config.failure_component],
                 "symptoms": config.symptoms,
@@ -289,7 +344,8 @@ class LLMClient:
             },
             "waypoints": config.waypoints,
             "px4_commands": {
-                "fault": config.px4_fault_cmd,
+                # Backward-compatible field name; value is a runtime marker, not shell command.
+                "fault": fault_marker,
             },
             "faa_source": {
                 "incident_id": final_id, # Keep strict traceability
@@ -319,6 +375,20 @@ class LLMClient:
             "generated_by": "FAA_To_PX4_Complete",
             "speed_m_s": config.speed_ms,
         }
+
+    @staticmethod
+    def _derive_fault_severity(failure_category: str) -> str:
+        """Map fault category to a stable MAVSDK-facing severity label."""
+        category = str(failure_category or "").strip().lower()
+        severity_map = {
+            "propulsion": "critical",
+            "power": "critical",
+            "control": "high",
+            "navigation": "high",
+            "airspace_violation": "high",
+            "environmental": "medium",
+        }
+        return severity_map.get(category, "medium")
 
 
 # =============================================================================

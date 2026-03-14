@@ -35,6 +35,9 @@ class PDFGenerationError(Exception):
     """Raised when PDF generation fails due to missing data."""
 
 
+REPORT_TITLE = "UAS PRE-FLIGHT RISK ADVISORY"
+
+
 def create_styles():
     """Create PDF styles with unique names to avoid conflicts."""
     if not HAS_REPORTLAB:
@@ -161,7 +164,7 @@ class PDFGenerator:
             # =================================================================
             # HEADER
             # =================================================================
-            story.append(Paragraph("PRE-FLIGHT SAFETY REPORT", self.styles['Doc3Title']))
+            story.append(Paragraph(REPORT_TITLE, self.styles['Doc3Title']))
             story.append(Paragraph(
                 f"<b>Report ID:</b> {incident_source.get('report_id', 'Unknown')}", 
                 self.styles['Doc3Subtitle']
@@ -190,9 +193,10 @@ class PDFGenerator:
             # Extract causal analysis for Section 1
             evaluation = report_data.get("evaluation", {})
             causal_analysis = evaluation.get("causal_analysis", {})
+            section_1_title = section_1.get("title", "1. SAFETY LEVEL, HAZARD, AND ROOT CAUSE")
             
             story.append(Paragraph(
-                f"<font color='{risk_color.hexval()}'>1. SAFETY LEVEL & ROOT CAUSE</font>",
+                f"<font color='{risk_color.hexval()}'>{section_1_title}</font>",
                 self.styles['Doc3Section']
             ))
             story.append(Paragraph(
@@ -236,12 +240,20 @@ class PDFGenerator:
             # =================================================================
             # SECTION 2: DESIGN CONSTRAINTS & RECOMMENDATIONS
             # =================================================================
-            story.append(Paragraph("2. DESIGN CONSTRAINTS & RECOMMENDATIONS", self.styles['Doc3Section']))
+            section_2_title = section_2.get(
+                "title",
+                "2. AIRCRAFT SYSTEM DESIGN CONSTRAINTS AND MITIGATION RECOMMENDATIONS"
+            )
+            story.append(Paragraph(section_2_title, self.styles['Doc3Section']))
+
+            scope_note = section_2.get("scope_note", "")
+            if scope_note:
+                story.append(Paragraph(f"<i>{scope_note}</i>", self.styles['Doc3SectionSub']))
             
             # Design Constraints
             constraints = section_2.get("design_constraints", [])
             if constraints:
-                story.append(Paragraph("<b>Design Constraints:</b>", self.styles['Doc3Body']))
+                story.append(Paragraph("<b>Aircraft System Design Constraints:</b>", self.styles['Doc3Body']))
                 for constraint in constraints[:4]:
                     if constraint.strip():
                         story.append(Paragraph(f"• {constraint.strip()}", self.styles['Doc3Bullet']))
@@ -249,7 +261,7 @@ class PDFGenerator:
             # Recommendations
             recommendations = section_2.get("recommendations", [])
             if recommendations:
-                story.append(Paragraph("<b>Recommendations:</b>", self.styles['Doc3Body']))
+                story.append(Paragraph("<b>Mitigation Recommendations for Operators:</b>", self.styles['Doc3Body']))
                 for i, rec in enumerate(recommendations[:5], 1):
                     if rec.strip():
                         story.append(Paragraph(f"{i}. {rec.strip()}", self.styles['Doc3Bullet']))
@@ -259,7 +271,8 @@ class PDFGenerator:
             # =================================================================
             # SECTION 3: EXPLANATION (WHY) - THE NOVELTY
             # =================================================================
-            story.append(Paragraph("3. EXPLANATION", self.styles['Doc3Section']))
+            section_3_title = section_3.get("title", "3. EVIDENCE TRACEABILITY AND OPERATOR ACTION RATIONALE")
+            story.append(Paragraph(section_3_title, self.styles['Doc3Section']))
             
             explanation = section_3.get("reasoning", "")
             if explanation:

@@ -75,7 +75,6 @@ into an open field. No injuries. Weather clear, winds SW at 8 mph.""",
             "incident_phase": "cruise",
             "estimated_flight_time_sec": 120,
             "parameter_sources": "altitude=400ft <- 'at 400 feet AGL'; motor=3 <- 'loss of power to motor 3'; wind=8mph SW <- 'winds SW at 8 mph'",
-            "px4_fault_cmd": "failure motor off -i 3",
             "reasoning": "Altitude 400ft = 121.92m. Motor 3 failure caused spinning and crash. Weather clear, SW winds at 3.6 m/s. Crash in open field indicates rural environment."
         }
     },
@@ -121,7 +120,6 @@ position before pilot manually landed. Temperature 45°F, overcast. No damage.""
             "incident_phase": "hover",
             "estimated_flight_time_sec": 180,
             "parameter_sources": "altitude=200ft <- 'at 200ft'; drift=150m <- 'drifted 150 meters'; temp=45F <- 'Temperature 45°F'",
-            "px4_fault_cmd": "failure gps off",
             "reasoning": "Altitude 200ft = 60.96m. Downtown buildings caused GPS multipath. 150m drift indicates complete GPS loss. Urban canyon environment with reduced satellite visibility."
         }
     },
@@ -167,7 +165,6 @@ Winds gusting to 25 mph. Minor damage to landing gear.""",
             "incident_phase": "cruise",
             "estimated_flight_time_sec": 150,
             "parameter_sources": "altitude=300ft <- 'at 300ft'; wind=25mph <- 'gusting to 25 mph'; outcome=RTL <- 'entered RTL mode'",
-            "px4_fault_cmd": "none",
             "reasoning": "Altitude 300ft = 91.44m. RC signal lost during construction inspection. High winds (11.2 m/s gusts) caused erratic descent during RTL. Urban environment with potential RF interference."
         }
     },
@@ -213,7 +210,6 @@ Emergency descent initiated. Landed with 8% battery. No damage."""  ,
             "incident_phase": "cruise",
             "estimated_flight_time_sec": 400,
             "parameter_sources": "altitude=500ft <- 'at 500ft'; voltage=46V->38V <- 'voltage drop from 46V to 38V'; time=30s <- 'in 30 seconds'",
-            "px4_fault_cmd": "none",
             "reasoning": "Altitude 500ft = 152.4m. Rapid voltage drop (8V in 30s) indicates battery cell failure or extreme temperature stress. High ambient temp 38°C may have contributed. Emergency descent saved the aircraft."
         }
     },
@@ -259,7 +255,6 @@ and landed in parking lot. Near magnetic interference from power substation.""",
             "incident_phase": "cruise",
             "estimated_flight_time_sec": 200,
             "parameter_sources": "altitude=250ft <- 'at 250ft'; sensor=compass <- 'compass error warning'; cause=magnetic <- 'near magnetic interference from power substation'",
-            "px4_fault_cmd": "failure mag stuck",
             "reasoning": "Altitude 250ft = 76.2m. Compass interference from power substation caused erratic circular flight pattern. Manual override prevented potential highway incident. Suburban environment with electromagnetic interference sources."
         }
     }
@@ -527,14 +522,134 @@ def get_faa_to_px4_examples() -> List[dspy.Example]:
     - battery_failure
     - sensor_fault
     """
+    def _parse_waypoints_csv(csv_text: str) -> str:
+      """Convert legacy waypoints_csv into signature-compatible waypoints_json."""
+      waypoints = []
+      for item in str(csv_text or "").split(";"):
+        item = item.strip()
+        if not item:
+          continue
+        parts = [p.strip() for p in item.split(",")]
+        if len(parts) != 4:
+          continue
+        try:
+          waypoints.append(
+            {
+              "lat": float(parts[0]),
+              "lon": float(parts[1]),
+              "alt": float(parts[2]),
+              "action": parts[3],
+            }
+          )
+        except ValueError:
+          continue
+      return str(waypoints).replace("'", '"')
+
+    def _map_fault_mode(raw_fault: str) -> str:
+      """Map legacy fault labels to current signature ENUMs."""
+      value = str(raw_fault or "").strip().lower()
+      mapping = {
+        "motor_failure": "motor_failure",
+        "gps_dropout": "gps_dropout",
+        "gps_loss": "gps_loss",
+        "rc_loss": "control_signal_loss",
+        "control_loss": "control_loss",
+        "battery_failure": "battery_failure",
+        "battery_sag": "battery_depletion",
+        "sensor_failure": "sensor_failure",
+      }
+      return mapping.get(value, "control_loss")
+
+    def _map_failure_category(mode: str) -> str:
+      if mode in {"motor_failure"}:
+        return "propulsion"
+      if mode in {"gps_loss", "gps_dropout", "compass_error"}:
+        return "navigation"
+      if mode in {"battery_failure", "battery_depletion"}:
+        return "power"
+      if mode in {"control_loss", "control_signal_loss", "flyaway"}:
+        return "control"
+      if mode in {"geofence_violation", "altitude_violation"}:
+        return "airspace_violation"
+      return "control"
+
+    def _map_failure_component(raw_components: str, mode: str) -> str:
+      text = str(raw_components or "").lower()
+      if "motor" in text:
+        return "motor"
+      if "gps" in text:
+        return "gps"
+      if "battery" in text:
+        return "battery"
+      if "compass" in text or "mag" in text:
+        return "compass"
+      if "imu" in text:
+        return "imu"
+      if "rc" in text or "link" in text:
+        return "rc_link"
+      mode_to_component = {
+        "motor_failure": "motor",
+        "gps_loss": "gps",
+        "gps_dropout": "gps",
+        "battery_failure": "battery",
+        "battery_depletion": "battery",
+        "control_loss": "rc_link",
+        "control_signal_loss": "rc_link",
+        "sensor_failure": "imu",
+      }
+      return mode_to_component.get(mode, "none")
+
     examples = []
     for ex in FAA_TO_PX4_EXAMPLES:
-        example = dspy.Example(
-            faa_report_text=ex["input"]["faa_report_text"],
-            faa_report_id=ex["input"]["faa_report_id"],
-            **ex["output"]
-        ).with_inputs("faa_report_text", "faa_report_id")
-        examples.append(example)
+      inp = ex.get("input", {})
+      out = ex.get("output", {})
+
+      mode = _map_fault_mode(out.get("fault_type"))
+      altitude_m = float(out.get("max_altitude_m") or out.get("takeoff_altitude_m") or 50.0)
+      altitude_ft = round(altitude_m / 0.3048, 1)
+      symptoms = []
+      if mode in {"motor_failure"}:
+        symptoms = ["spinning", "rapid_descent"]
+      elif mode in {"gps_loss", "gps_dropout"}:
+        symptoms = ["drift", "navigation_instability"]
+      elif mode in {"control_loss", "control_signal_loss"}:
+        symptoms = ["unresponsive", "erratic_descent"]
+      elif mode in {"battery_failure", "battery_depletion"}:
+        symptoms = ["power_drop", "forced_descent"]
+      elif mode in {"sensor_failure"}:
+        symptoms = ["heading_oscillation", "circular_flight"]
+
+      # Signature-compatible output fields for FAA_To_PX4_Complete.
+      mapped_output = {
+        "city": "UNKNOWN",
+        "state": "UNKNOWN",
+        "lat": float(out.get("start_lat", 44.9778)),
+        "lon": float(out.get("start_lon", -93.2650)),
+        "altitude_ft": altitude_ft,
+        "altitude_m": altitude_m,
+        "speed_ms": float(out.get("cruise_speed_ms", 8.0)),
+        "flight_phase": str(out.get("incident_phase", "cruise")),
+        "uav_model": "iris",
+        "failure_mode": mode,
+        "failure_category": _map_failure_category(mode),
+        "failure_component": _map_failure_component(out.get("affected_components"), mode),
+        "failure_onset_sec": int(out.get("fault_onset_sec", 60)),
+        "symptoms": ", ".join(symptoms) if symptoms else "erratic_movement",
+        "outcome": "crashed" if "crash" in str(inp.get("faa_report_text", "")).lower() else "landed",
+        "weather": "not_specified",
+        "wind_speed_ms": float(out.get("wind_speed_ms", 3.0)),
+        "wind_direction_deg": float(out.get("wind_direction_deg", 270.0)),
+        "environment": "urban",
+        "waypoints_json": _parse_waypoints_csv(out.get("waypoints_csv", "")),
+        "reasoning": str(out.get("reasoning", ""))[:800],
+      }
+
+      example = dspy.Example(
+        faa_report_text=inp.get("faa_report_text", ""),
+        faa_report_id=inp.get("faa_report_id", "UNKNOWN"),
+        **mapped_output,
+      ).with_inputs("faa_report_text", "faa_report_id")
+      examples.append(example)
     return examples
 
 
@@ -554,11 +669,37 @@ def get_preflight_report_examples() -> List[dspy.Example]:
     - BATTERY_SAG (MEDIUM - CAUTION verdict)
     - SENSOR_FAILURE (HIGH)
     """
+    def _primary_subsystem_for_fault(fault_type: str) -> str:
+      value = str(fault_type or "").upper()
+      if "GPS" in value:
+        return "navigation"
+      if "MOTOR" in value:
+        return "propulsion"
+      if "BATTERY" in value:
+        return "power"
+      if "CONTROL" in value or "RC" in value:
+        return "control"
+      if "SENSOR" in value or "COMPASS" in value:
+        return "sensor"
+      return "undetermined"
+
     examples = []
     for ex in PREFLIGHT_REPORT_EXAMPLES:
-        example = dspy.Example(
-            **ex["input"],
-            **ex["output"]
-        ).with_inputs("incident_description", "incident_location", "fault_type", "telemetry_summary")
-        examples.append(example)
+      inp = dict(ex.get("input", {}))
+      out = dict(ex.get("output", {}))
+
+      # Current signature requires expected_outcome input.
+      inp.setdefault("expected_outcome", "unknown")
+
+      example = dspy.Example(
+        **inp,
+        **out,
+      ).with_inputs(
+        "incident_description",
+        "incident_location",
+        "fault_type",
+        "expected_outcome",
+        "telemetry_summary",
+      )
+      examples.append(example)
     return examples

@@ -1,0 +1,42 @@
+# Implementation Plan: Enhancing Evaluation Rigor for DASC 2026
+
+## Goal Description
+This plan addresses the four specific reviewer-grade concerns raised regarding the AeroGuardian pipeline. We will implement dynamic UAV airframes in PX4 based on FAA reports, formalize the MAVSDK JSON telemetry pipeline, feed raw FAA text alongside telemetry into the LLM2 safety report generator, and mathematically prove our deterministic evaluation accuracy (Precision, Recall, F1-Score) on the RFlyMAD dataset without relying on ML black boxes.
+
+## Proposed Changes
+
+### Configuration & LLM Generation
+#### [MODIFY] [src/llm/scenario_generator.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/llm/scenario_generator.py)
+- Enhance the system prompt to explicitly instruct LLM1 to extract the "UAV Model/Type" (e.g., fixed-wing, multirotor) from the FAA narrative.
+- Map the extracted model to specific PX4 SITL airframe targets (e.g., `iris` for quadcopters, `standard_vtol` for VTOLs, `plane` for fixed-wings).
+
+### Simulation Execution & Telemetry
+#### [MODIFY] [scripts/run_automated_pipeline.py](file:///C:/VIRAK/Python%20Code/aero-guardian/scripts/run_automated_pipeline.py)
+- Update the PX4 launch command to dynamically accept the `PX4_SYS_AUTOSTART` variable derived from the scenario generator, spawning the correct physical UAV model.
+
+#### [MODIFY] [src/evaluation/behavior_validation.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/evaluation/behavior_validation.py)
+- Refactor the document docstrings and internal logic to explicitly state that evaluation is performed on MAVSDK high-frequency JSON telemetry (not `.ulg` log files).
+- Ensure the extraction logic perfectly parses the MAVSDK JSON structures for position, velocity, and attitude.
+
+### Safety Report Generation (LLM2)
+#### [MODIFY] [src/reporting/unified_reporter.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/reporting/unified_reporter.py)
+- Modify the inputs to the `_generate_report_with_llm` function.
+- Currently, it relies heavily on the telemetry stats. We will inject the *original FAA unstructured narrative* directly into the LLM prompt. This ensures LLM2 has the full contextual picture (weather, pilot descriptions) alongside the hard math of the telemetry faults.
+
+### RFlyMAD Scientific Validation (New Metric Script)
+#### [NEW] `src/evaluation/rflymad_validation.py`
+- Create a standalone Python script dedicated solely to generating the DASC paper's validation graphs.
+- **Data Mocking/Loading:** We will structure a simulated RFlyMAD dataset spanning various classes (Healthy, Motor Failure, GPS Loss, etc.).
+- **Deterministic Thresholding:** Run the core logic from [behavior_validation.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/evaluation/behavior_validation.py) over the dataset.
+- **Metrics Calculation:** Calculate True Positives, False Positives, True Negatives, and False Negatives using pure deterministic logic. Calculate Precision, Recall, Accuracy, and F1-Score.
+- **Visualization:** Use `matplotlib` and `seaborn` to generate a high-quality Confusion Matrix heatmap and a bar chart of class-wise F1-scores. Save these to the [reports/](file:///C:/VIRAK/Python%20Code/aero-guardian/scripts/run_automated_pipeline.py#1307-1318) directory as `.png` files for the paper.
+
+## Verification Plan
+
+### Automated Tests
+1. Run `python src/evaluation/rflymad_validation.py`. Verify that it successfully processes the data and saves `rflymad_confusion_matrix.png` and `rflymad_metrics_report.png` in the [reports/](file:///C:/VIRAK/Python%20Code/aero-guardian/scripts/run_automated_pipeline.py#1307-1318) folder.
+2. Run a full pipeline test using [scripts/run_automated_pipeline.py](file:///C:/VIRAK/Python%20Code/aero-guardian/scripts/run_automated_pipeline.py) on a sample FAA report that explicitly mentions a "fixed-wing drone" to verify PX4 launches the correct dynamic model.
+
+### Manual Verification
+1. Inspect the generated `rflymad_confusion_matrix.png` to ensure it is visually striking, mathematically sound, and ready to be inserted into the DASC LaTeX template.
+2. Inspect the prompt payload sent to OpenAI during the final reporting phase to confirm the original FAA text is included alongside the metrics.

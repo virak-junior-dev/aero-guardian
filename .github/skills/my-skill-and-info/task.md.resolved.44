@@ -1,0 +1,19 @@
+# AeroGuardian Evaluation Upgrades - Task Breakdown
+
+## 1. Dynamic UAV Model Configuration
+- [ ] Analyze [scenario_generator.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/llm/scenario_generator.py) to extract UAV model keywords (e.g., fixed-wing, quad, hex) from FAA descriptions.
+- [ ] Update PX4 SITL launch logic to spawn the correct airframe (e.g., `iris`, `standard_vtol`, `plane`) based on the extracted model.
+
+## 2. Telemetry Architecture Update
+- [ ] Update methodology documentation to explicitly state the use of MAVSDK JSON telemetry streams at 5-10Hz, replacing `.ulg` references.
+- [ ] Validate that MAVSDK JSON telemetry resolution is sufficient for 3-sigma anomaly detection.
+
+## 3. LLM2 Context Refinement 
+- [ ] Document that LLM2 receives both the mathematical BRR anomaly flags AND the original FAA narrative unstructured text to produce contextually accurate reports.
+
+## 4. RFlyMAD Validation & Metrics
+- [ ] Write `src/evaluation/rflymad_validation.py` to apply deterministic thresholds against the RFlyMAD dataset.
+- [ ] Calculate True Positives (TP), FP, TN, FN.
+- [ ] Calculate Precision, Recall, F1-Score, and Accuracy without Scikit-Learn.
+- [ ] Generate Confusion Matrix plots using `matplotlib` and `seaborn`.
+- [ ] Save the plots as paper-ready assets in the [reports/](file:///C:/VIRAK/Python%20Code/aero-guardian/scripts/run_automated_pipeline.py#1307-1318) directory.

@@ -30,6 +30,8 @@ from typing import Dict, List, Any
 
 logger = logging.getLogger("AeroGuardian.Reporter")
 
+REPORT_TITLE = "UAS PRE-FLIGHT RISK ADVISORY"
+
 # Import NEW 4-metric evaluation module (SFS, BRR, ECC, ESRI)
 try:
     from src.evaluation.evaluate_case import (
@@ -296,11 +298,7 @@ class UnifiedReporter:
         if env.get("weather") in ["not_specified", "unknown", None, ""]:
             assumptions.append("Weather conditions unknown, using defaults")
         
-        # Check if altitude was clamped
-        mission = flight_config.get("mission", {})
-        if mission.get("takeoff_altitude_m", 0) == 120.0:
-            assumptions.append("Altitude clamped to 120m simulation limit")
-        
+        # Note: Altitude clamping (previously 120m) was removed to support full high-altitude modeling
         return assumptions
     
     def _build_report_data(
@@ -320,6 +318,13 @@ class UnifiedReporter:
         
         # Extract telemetry statistics
         telemetry_stats = self._analyze_telemetry(telemetry) if telemetry else {}
+
+        # Extract causal fields if available from upstream analysis
+        primary_failure_subsystem = safety_analysis.get("primary_failure_subsystem", "undetermined")
+        causal_chain = safety_analysis.get("causal_chain", [])
+        if isinstance(causal_chain, str):
+            causal_chain = [c.strip() for c in causal_chain.split("->") if c.strip()]
+        subsystem_confidence = safety_analysis.get("subsystem_confidence", safety_analysis.get("confidence", 0.0))
         
         # Extract go/no-go verdict
         verdict = safety_analysis.get("verdict", "REVIEW")
@@ -332,7 +337,7 @@ class UnifiedReporter:
         
         # Build the NEW 3-SECTION report structure
         return {
-            "report_type": "PRE-FLIGHT SAFETY REPORT",
+            "report_type": REPORT_TITLE,
             "version": "1.0",
             "generated_at": datetime.now().isoformat(),
             
@@ -362,8 +367,12 @@ class UnifiedReporter:
             # What went wrong and how dangerous it is
             # =========================================================
             "section_1_safety_level_and_cause": {
+                "title": "1. SAFETY LEVEL, HAZARD, AND ROOT CAUSE",
                 "safety_level": safety_analysis.get("safety_level", safety_analysis.get("hazard_level", "UNKNOWN")),
                 "primary_hazard": safety_analysis.get("primary_hazard", safety_analysis.get("hazard_type", "Unknown hazard")),
+                "root_cause_subsystem": primary_failure_subsystem,
+                "causal_chain": causal_chain,
+                "root_cause_confidence": subsystem_confidence,
                 "observed_effect": safety_analysis.get("observed_effect", "No specific effect observed"),
             },
             
@@ -372,6 +381,8 @@ class UnifiedReporter:
             # What MUST be constrained or changed before flight
             # =========================================================
             "section_2_design_constraints_and_recommendations": {
+                "title": "2. AIRCRAFT SYSTEM DESIGN CONSTRAINTS AND MITIGATION RECOMMENDATIONS",
+                "scope_note": "Design constraints apply to aircraft system configuration and operating envelope. Recommendations target operator actions and engineering mitigations.",
                 "design_constraints": safety_analysis.get("design_constraints", []),
                 "recommendations": safety_analysis.get("recommendations", safety_analysis.get("safety_recommendations", [])),
             },
@@ -381,6 +392,7 @@ class UnifiedReporter:
             # Why the system reached this conclusion - THE NOVELTY
             # =========================================================
             "section_3_explanation": {
+                "title": "3. EVIDENCE TRACEABILITY AND OPERATOR ACTION RATIONALE",
                 "reasoning": safety_analysis.get("explanation", safety_analysis.get("conclusion", "Analysis based on FAA incident and simulation data.")),
             },
             
@@ -391,6 +403,15 @@ class UnifiedReporter:
                 "decision": verdict,
                 "go_nogo": verdict,
             },
+
+            # Structured causal fields for downstream auditing/evaluation
+            "primary_hazard": safety_analysis.get("primary_hazard", safety_analysis.get("hazard_type", "Unknown hazard")),
+            "primary_failure_subsystem": primary_failure_subsystem,
+            "causal_analysis": {
+                "primary_failure_subsystem": primary_failure_subsystem,
+                "causal_chain": causal_chain,
+                "confidence": subsystem_confidence,
+            },
             
             # =========================================================
             # SUPPORTING DATA (Telemetry & Config)
@@ -399,6 +420,7 @@ class UnifiedReporter:
                 "simulation_config": {
                     "waypoints_count": len(flight_config.get("waypoints", [])),
                     "fault_type": flight_config.get("fault_injection", {}).get("fault_type", "None"),
+                    "airframe_model": flight_config.get("uav_model", flight_config.get("vehicle_type", "x500_quadcopter")),
                     "altitude_m": flight_config.get("mission", {}).get("takeoff_altitude_m", 0),
                     "speed_ms": flight_config.get("speed_m_s", 5.0),
                 },
@@ -442,10 +464,43 @@ class UnifiedReporter:
             return angle_deg
         
         alts = [t.get("alt", 0) for t in telemetry]
-        speeds = [(t.get("vx", 0)**2 + t.get("vy", 0)**2)**0.5 for t in telemetry]
-        # Convert radians to degrees AND normalize to ±180°
-        pitches = [normalize_angle(t.get("pitch", 0) * 57.3) for t in telemetry]
-        rolls = [normalize_angle(t.get("roll", 0) * 57.3) for t in telemetry]
+
+        # Robust speed extraction: prefer explicit horizontal velocity, otherwise
+        # estimate from GPS deltas when velocity channels are unavailable.
+        speeds = []
+        prev = None
+        for t in telemetry:
+            spd = None
+
+            vx = t.get("vx")
+            vy = t.get("vy")
+            if vx is not None and vy is not None:
+                spd = (vx**2 + vy**2) ** 0.5
+            else:
+                vel_n = t.get("vel_n_m_s")
+                vel_e = t.get("vel_e_m_s")
+                if vel_n is not None and vel_e is not None:
+                    spd = (vel_n**2 + vel_e**2) ** 0.5
+
+            if spd is None and prev is not None:
+                dt = t.get("timestamp", 0) - prev.get("timestamp", 0)
+                if dt > 0:
+                    lat1, lon1 = prev.get("lat", 0), prev.get("lon", 0)
+                    lat2, lon2 = t.get("lat", 0), t.get("lon", 0)
+                    if lat1 and lon1 and lat2 and lon2:
+                        dlat = (lat2 - lat1) * 111000
+                        dlon = (lon2 - lon1) * 111000 * abs(math.cos(math.radians(lat1)))
+                        spd = math.sqrt(dlat**2 + dlon**2) / dt
+
+            speeds.append(float(spd) if spd is not None else 0.0)
+            prev = t
+
+        # Roll/pitch may arrive either in radians or degrees depending on source.
+        def to_degrees_if_needed(angle_value: float) -> float:
+            return angle_value * 57.2958 if abs(angle_value) <= (2 * math.pi + 0.01) else angle_value
+
+        pitches = [normalize_angle(to_degrees_if_needed(t.get("pitch", 0))) for t in telemetry]
+        rolls = [normalize_angle(to_degrees_if_needed(t.get("roll", 0))) for t in telemetry]
         
         # Calculate GPS variance (position drift) - max distance from start position
         # CRITICAL: Only use telemetry points with valid GPS coordinates (non-zero)
@@ -576,11 +631,14 @@ class UnifiedReporter:
         reconstruction_level = flight_config.get("reconstruction_level", "proxy_simulation")
         
         # Check for fault alignment issue (P0)
-        px4_cmd = flight_config.get("px4_commands", {}).get("fault", "none")
+        injection_marker = flight_config.get("px4_commands", {}).get("fault", "unknown")
         fault_type = flight_config.get("fault_injection", {}).get("fault_type", "unknown")
         fault_alignment_warning = None
-        if px4_cmd in ["none", "", "n/a"] and fault_type not in ["none", "unknown"]:
-            fault_alignment_warning = f"UNSUPPORTED: fault_type='{fault_type}' but px4_fault_cmd='none'. Using behavioral emulation."
+        if (not fault_injection_supported) and fault_type not in ["none", "unknown"]:
+            fault_alignment_warning = (
+                f"UNSUPPORTED: fault_type='{fault_type}' but fault_injection_supported=False "
+                f"(injection_marker='{injection_marker}'). Using behavioral emulation."
+            )
         
         # Check for fault injection execution status
         fault_injection_status = flight_config.get("fault_injection_status", {})
@@ -745,7 +803,7 @@ class UnifiedReporter:
         s6 = report_data.get("section_6_conclusion", {})
         
         summary_data = [
-            ("PRE-FLIGHT SAFETY REPORT", ""),
+            (REPORT_TITLE, ""),
             ("", ""),
             # ("SECTION 1: INCIDENT SOURCE", ""),
             ("Report ID", s1.get("report_id", report_data.get("incident", {}).get("id", "Unknown"))),
@@ -773,7 +831,7 @@ class UnifiedReporter:
             ws_summary.cell(row=row_idx, column=1, value=label)
             ws_summary.cell(row=row_idx, column=2, value=value)
             
-            if label.startswith("SECTION") or label == "PRE-FLIGHT SAFETY REPORT":
+            if label.startswith("SECTION") or label == REPORT_TITLE:
                 ws_summary.cell(row=row_idx, column=1).fill = header_fill
                 ws_summary.cell(row=row_idx, column=1).font = header_font
         
@@ -814,7 +872,7 @@ class UnifiedReporter:
         ] + [(f"☐ {item}", "") for item in safety_recs] + [
             ("", ""),
             ("HAZARD INDICATORS TO MONITOR", ""),
-        ] + [(f"⚠ {item}", "") for item in hazards] + [
+        ] + [(f">>>>>  {item}", "") for item in hazards] + [
             ("", ""),
             ("VERDICT", s6.get("verdict", "REVIEW")),
             ("GO/NO-GO", s6.get("go_nogo_recommendation", "")),
@@ -843,17 +901,17 @@ class UnifiedReporter:
         #         ("", ""),
         #         ("INPUT FIDELITY", ""),
         #         ("Extraction Score", f"{evaluation_result.input_fidelity.extraction_score:.1%}"),
-        #         ("Fault Type Extracted", "✓" if evaluation_result.input_fidelity.fault_type_extracted else "✗"),
-        #         ("Location Extracted", "✓" if evaluation_result.input_fidelity.location_extracted else "✗"),
-        #         ("Waypoints Generated", "✓" if evaluation_result.input_fidelity.waypoints_generated else "✗"),
+        #         ("Fault Type Extracted", ">>>>> " if evaluation_result.input_fidelity.fault_type_extracted else "✗"),
+        #         ("Location Extracted", ">>>>> " if evaluation_result.input_fidelity.location_extracted else "✗"),
+        #         ("Waypoints Generated", ">>>>> " if evaluation_result.input_fidelity.waypoints_generated else "✗"),
         #         ("LLM Latency (ms)", f"{evaluation_result.input_fidelity.llm_response_time_ms:.0f}"),
         #         ("", ""),
         #         ("SIMULATION VALIDITY", ""),
         #         ("Behavior Match Score", f"{evaluation_result.simulation_validity.behavior_match_score:.1%}"),
         #         ("Semantic Similarity", f"{evaluation_result.simulation_validity.semantic_similarity:.2f}"),
         #         ("Telemetry Points", evaluation_result.simulation_validity.telemetry_points_count),
-        #         ("Simulation Completed", "✓" if evaluation_result.simulation_validity.simulation_completed else "✗"),
-        #         ("Fault Manifested", "✓" if evaluation_result.simulation_validity.fault_manifested else "✗"),
+        #         ("Simulation Completed", ">>>>> " if evaluation_result.simulation_validity.simulation_completed else "✗"),
+        #         ("Fault Manifested", ">>>>> " if evaluation_result.simulation_validity.fault_manifested else "✗"),
         #         ("", ""),
         #         ("OUTPUT UTILITY", ""),
         #         ("Prevention Score", f"{evaluation_result.output_utility.prevention_score}/100"),
@@ -868,7 +926,7 @@ class UnifiedReporter:
             
         #     # Add targets met
         #     for target_name, met in evaluation_result.targets_met.items():
-        #         eval_rows.append((target_name.replace("_", " ").title(), "✓" if met else "✗"))
+        #         eval_rows.append((target_name.replace("_", " ").title(), ">>>>> " if met else "✗"))
             
         #     for row_idx, (label, value) in enumerate(eval_rows, 1):
         #         cell_label = ws_eval.cell(row=row_idx, column=1, value=label)

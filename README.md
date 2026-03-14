@@ -154,7 +154,7 @@ The following tables define the exact data contracts between each pipeline phase
 | Attribute | Specification |
 |:----------|:--------------|
 | **Module** | `src/faa/sighting_filter.py` |
-| **Input** | `data/processed/faa_reports/faa_simulatable.json` (8,031 records) |
+| **Input** | `data/new_data/faa/faa_simulatable.json` (latest regenerated records) |
 | **Output** | Python `Dict` with standardized incident record |
 
 **Input Schema (FAA JSON):**
@@ -595,7 +595,7 @@ FAA Sighting Report (JSON)
 | **Python** | 3.10+ (Windows) |
 | **RAM** | 8GB minimum (16GB recommended) |
 | **Disk** | 20GB (with PX4 and Gazebo) |
-| **API** | OpenAI API key (GPT-4o access) |
+| **API** | Anthropic or OpenAI API key (provider-switchable) |
 
 ### WSL2 Requirements
 
@@ -621,11 +621,18 @@ cd aero-guardian
 .\setup.bat
 ```
 
-### Step 2: Configure API Key
+### Step 2: Configure LLM Provider and API Key
 
 Create a `.env` file in the project root:
 
 ```env
+LLM_PROVIDER=anthropic
+
+# Anthropic (Claude)
+ANTHROPIC_API_KEY={API_KEY}
+ANTHROPIC_MODEL=claude-sonnet-4-5-20250929
+
+# Optional OpenAI fallback (or set LLM_PROVIDER=openai)
 OPENAI_API_KEY={API_KEY}
 OPENAI_MODEL=gpt-4o
 ```
@@ -659,8 +666,8 @@ python -c "import mavsdk; print('MAVSDK:', mavsdk.__version__)"
 # Check DSPy
 python -c "import dspy; print('DSPy OK')"
 
-# Check OpenAI connection
-python -c "from dotenv import load_dotenv; load_dotenv(); import os; print('API Key:', 'Set' if os.getenv('OPENAI_API_KEY') else 'NOT SET')"
+# Check provider/key wiring
+python -c "from dotenv import load_dotenv; load_dotenv(); import os; p=os.getenv('LLM_PROVIDER','anthropic'); print('Provider:', p); print('Anthropic key:', 'Set' if os.getenv('ANTHROPIC_API_KEY') else 'NOT SET'); print('OpenAI key:', 'Set' if os.getenv('OPENAI_API_KEY') else 'NOT SET')"
 ```
 
 ---
@@ -1121,7 +1128,7 @@ outputs/{report_id}_{timestamp}/
 | **PX4 SITL timeout** | First build takes 10-15 min; subsequent runs are faster |
 | **Gazebo not starting** | Use `--headless` mode or install VcXsrv |
 | **MAVSDK connection failed** | Check WSL IP and firewall settings |
-| **OpenAI API error** | Verify `.env` file has valid `OPENAI_API_KEY` |
+| **LLM API error** | Verify `.env` provider (`LLM_PROVIDER`) and matching API key (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`) |
 | **"Event loop is closed"** | Normal cleanup message from gRPC, can be ignored |
 
 ### Checking WSL IP (PowerShell)
@@ -1237,7 +1244,7 @@ MIT License - see [LICENSE](LICENSE) file.
 
 - **FAA** - UAS Sighting Reports (2019-2025)
 - **PX4 Autopilot** - SITL simulation framework
-- **OpenAI** - GPT-4o language model
+- **Anthropic / OpenAI** - Claude or GPT language models (provider-switchable)
 - **DSPy (Stanford NLP)** - Structured LLM output framework
 - **MAVSDK** - Drone SDK for mission execution
 - **Gazebo** - Physics simulation (Harmonic & Classic)

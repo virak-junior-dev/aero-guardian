@@ -1,0 +1,38 @@
+# Implementation Plan: Enhancing Evaluation Rigor & Claude Integration
+
+## Goal Description
+This plan addresses the reviewer-grade concerns to make the AeroGuardian evaluation pipeline mathematically rigorous, while also executing a mandatory infrastructure switch from OpenAI to Anthropic (Claude AI) due to API constraints. We will optimize the DSPy Signatures for Claude, implement dynamic UAV airframes in PX4, formalize MAVSDK JSON telemetry pipelines, inject raw FAA narratives into LLM2, and prove our accuracy via an RFlyMAD Confusion Matrix script.
+
+## Proposed Changes
+
+### Core LLM Infrastructure (The Multi-Model Strategy Pattern)
+#### [MODIFY] `src/llm/llm_setup.py` (or equivalent auth file)
+- Implement an explicit adapter/factory for `dspy.Anthropic` (Claude) and `dspy.OpenAI`. 
+- For the current testing phase, default the environment configuration to Claude.
+
+#### [MODIFY] [src/llm/scenario_generator.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/llm/scenario_generator.py) (LLM1)
+- **Model-Specific DSPy Signatures (Maximum Quality):** A generic prompt forces compromise. We will implement a Strategy Pattern. If the connector detects Anthropic, it injects Claude's optimal specific tricks (e.g., `<thinking>` XML blocks, negative constraint lists). If it detects OpenAI, it injects OpenAI's optimal specific tricks (e.g., strict JSON schemas, system role strictness). Both models hit their maximum theoretical capability.
+- **Dynamic UAV Model Extraction:** Add a specific output field to the Signature schemas: `uav_model: str`. Map the FAA text explicitly to: `iris` (quadcopter), `standard_vtol` (VTOL operations), `plane` (fixed-wing).
+
+#### [MODIFY] [src/reporting/unified_reporter.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/reporting/unified_reporter.py) (LLM2)
+- **DSPy Signature Upgrade:** Restructure the signature to enforce the Actionability and Grounding Index (AGI) philosophy.
+- **Context Injection:** Update the input payload to pass `faa_narrative` alongside `telemetry_metrics` and `detected_anomalies`. 
+- **Recommendation Enforcement:** Add strict rules in the DSPy docstring that recommendations *must* trace back to the detected telemetry anomalies or they will be penalized.
+
+### Simulation Execution & Telemetry
+#### [MODIFY] [scripts/run_automated_pipeline.py](file:///c:/VIRAK/Python%20Code/aero-guardian/scripts/run_automated_pipeline.py)
+- Parse the [uav_model](file:///c:/VIRAK/Python%20Code/aero-guardian/src/analysis/faa_analysis.py#327-362) from the LLM1 output.
+- Update the PX4 launch payload. Translate the string to the correct `PX4_SYS_AUTOSTART` variable (e.g., `iris` = `10016`, `plane` = `2100`, `standard_vtol` = `4001`).
+
+### RFlyMAD Scientific Validation 
+#### [NEW] `src/evaluation/rflymad_validation.py`
+- Create a standalone Python script dedicated solely to generating the DASC paper's validation graphs.
+- **Deterministic Thresholding:** Run the core logic from [behavior_validation.py](file:///C:/VIRAK/Python%20Code/aero-guardian/src/evaluation/behavior_validation.py) over a mocked/structured RFlyMAD dataset.
+- **Metrics Calculation:** Calculate True Positives, False Positives, True Negatives, and False Negatives using pure deterministic logic. Calculate Precision, Recall, Accuracy, and F1-Score.
+- **Visualization:** Use `matplotlib` and `seaborn` to generate a high-quality Confusion Matrix heatmap and a bar chart of class-wise F1-scores. Save these to the [reports/](file:///c:/VIRAK/Python%20Code/aero-guardian/scripts/run_automated_pipeline.py#1307-1318) directory as `.png` files for the paper.
+
+## Verification Plan
+1. Check that the Claude API key is pulling correctly from the [.env](file:///C:/VIRAK/Python%20Code/aero-guardian/.env) file and that DSPy successfully initiates the Anthropic client.
+2. Run the scenario generator module standalone to verify Claude obeys the strict DSPy JSON constraints.
+3. Execute [run_automated_pipeline.py](file:///c:/VIRAK/Python%20Code/aero-guardian/scripts/run_automated_pipeline.py) with an FAA text that explicitly states "fixed-wing drone" and verify the terminal logs indicate PX4 launched the `plane` airframe.
+4. Execute `python src/evaluation/rflymad_validation.py` and inspect `rflymad_confusion_matrix.png` for mathematical correctness (no scikit-learn used).

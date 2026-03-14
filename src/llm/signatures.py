@@ -76,10 +76,12 @@ class FAA_To_PX4_Complete(dspy.Signature):
     - Include hover point if "hovering" mentioned
     - Altitude in meters (max 120m for drone simulation realism)
     
-    OUTPUT QUALITY:
+    OUTPUT QUALITY & UNIVERSAL FORMATTING RULES:
     - All coordinates must be realistic for the reported location
     - Failure parameters must produce behavior matching the sighting description
     - Reasoning must explain how you interpreted the sighting report
+    - You must strictly adhere to the designated output schema and field definitions.
+    - Provide exact string matches where ENUMs (MUST be one of) are specified.
     """
     
     # =========================================================================
@@ -123,8 +125,8 @@ class FAA_To_PX4_Complete(dspy.Signature):
     flight_phase: str = dspy.OutputField(
         desc="Inferred flight phase: takeoff | climb | cruise | hover | descent | landing"
     )
-    uas_type: str = dspy.OutputField(
-        desc="UAS type if mentioned, else 'unknown_multirotor' or 'unknown_fixed_wing'"
+    uav_model: str = dspy.OutputField(
+        desc="Dynamic PX4 Simulation Airframe. MUST be exactly one of: 'iris' (for multirotors/quadcopters/unknown), 'plane' (for fixed-wing aircraft), or 'standard_vtol' (for VTOL/hybrid aircraft). Infer from sighting text."
     )
     
     # =========================================================================
@@ -167,13 +169,6 @@ class FAA_To_PX4_Complete(dspy.Signature):
     )
     environment: str = dspy.OutputField(
         desc="Environment type: urban | suburban | rural | airport_vicinity | industrial"
-    )
-    
-    # =========================================================================
-    # PX4 SIMULATION COMMANDS
-    # =========================================================================
-    px4_fault_cmd: str = dspy.OutputField(
-        desc="PX4 fault injection command. Format: 'failure <component> <type> [-i <instance>]'. Valid components: motor, gps, mag, baro, gyro, accel. Valid types: off, stuck, garbage, wrong, slow, delayed. Examples: 'failure motor off -i 1' (motor 1 off), 'failure gps off' (GPS loss), 'failure mag stuck' (compass stuck). Use 'none' if failure cannot be injected via PX4 shell (e.g., RC loss, battery sag)."
     )
     
     # =========================================================================
@@ -254,12 +249,14 @@ class GeneratePreFlightReport(dspy.Signature):
     - NO-GO: Unacceptable risk, do not fly until hazard is mitigated
     
     ============================================================================
-    CRITICAL ACCURACY RULES
+    CRITICAL UNIVERSAL ACCURACY RULES (AGI METRIC ENFORCEMENT)
     ============================================================================
-    1. Primary hazard MUST match the fault_type input
-    2. Recommendations MUST address the specific fault_type
-    3. Do NOT claim telemetry anomalies that aren't in the data
-    4. Be honest about simulation limitations
+    1. Primary hazard MUST match the fault_type input exactly.
+    2. Recommendations MUST address the specific fault_type.
+    3. MATHEMATICAL TRACEABILITY: All design constraints and recommendations MUST explicitly cite the numerical evidence from the telemetry_summary. If telemetry is normal, DO NOT invent anomalies.
+    4. Include practical UAS descriptors when available in narrative context (model/class hint, color, size, shape) and use professional terminology.
+    5. Do NOT use vague wording such as "improve reliability", "enhance safety", "be careful", "monitor closely", or non-professional descriptors.
+    6. You must strictly adhere to the designated output schema and field definitions. Provide exact string matches where ENUMs are specified.
     """
     
     # =========================================================================
@@ -295,33 +292,20 @@ class GeneratePreFlightReport(dspy.Signature):
     )
     
     # =========================================================================
-    # CAUSAL ANALYSIS
-    # =========================================================================
-    primary_failure_subsystem: str = dspy.OutputField(
-        desc="Primary failure subsystem based on TEMPORAL ORDERING of anomalies (which subsystem showed abnormal behavior FIRST). MUST be one of: navigation | control | propulsion | sensor | power | undetermined. Base this on which subsystem failed FIRST, not on crash severity. If insufficient evidence, use 'undetermined'."
-    )
-    causal_chain: str = dspy.OutputField(
-        desc="Causal chain from root cause to outcome. Format: 'subsystem1 → subsystem2 → outcome'. Example: 'navigation (GPS loss @ t=32s) → control (attitude drift @ t=45s) → crash'. The FIRST item must match primary_failure_subsystem. If undetermined, use 'insufficient_evidence'."
-    )
-    subsystem_evidence_summary: str = dspy.OutputField(
-        desc="Evidence table showing anomalies per subsystem with timestamps, ordered by first detection time. Format: 'Navigation: [anomaly1 @ t=Xs, anomaly2 @ t=Ys] | Control: [anomaly3 @ t=Zs] | Propulsion: [none] | ...'. Include only subsystems with detected anomalies."
-    )
-    
-    # =========================================================================
     # SECTION 2: DESIGN CONSTRAINTS & RECOMMENDATIONS
     # =========================================================================
     design_constraints: str = dspy.OutputField(
-        desc="2-4 SPECIFIC operational constraints relevant to fault_type, separated by |. Prefix each with 'Consider:'. Example for motor_failure: 'Consider: Maintain minimum altitude of 30m AGL for recovery time | Consider: Limit operations over populated areas | Consider: Visual line of sight operations'."
+        desc="2-4 SPECIFIC aircraft system design constraints relevant to fault_type, separated by |. Prefix each with 'Consider:'. Each item must include a measurable criterion (numeric threshold, timing, or trigger). Example for motor_failure: 'Consider: Maintain minimum altitude of 30m AGL for recovery time | Consider: Limit operations over populated areas | Consider: Visual line of sight operations'."
     )
     recommendations: str = dspy.OutputField(
-        desc="3-5 SUGGESTED engineering/procedural recommendations for the specific fault_type, separated by |. Prefix each with 'Consider:'. These are scenario-based suggestions, not regulatory requirements. Example for motor_failure: 'Consider: Redundant motor configuration may reduce single-point failure risk | Consider: Pre-flight vibration monitoring | Consider: Parachute recovery system'."
+        desc="3-5 SUGGESTED mitigation design recommendations for the specific fault_type, separated by |. Prefix each with 'Consider:'. Each recommendation must identify subsystem + parameter + measurable threshold/action criterion, and must not be generic. These are scenario-based suggestions, not regulatory requirements. Example for motor_failure: 'Consider: Redundant motor configuration may reduce single-point failure risk | Consider: Pre-flight vibration monitoring | Consider: Parachute recovery system'."
     )
     
     # =========================================================================
     # SECTION 3: EVIDENCE-BASED EXPLANATION
     # =========================================================================
     explanation: str = dspy.OutputField(
-        desc="3-5 sentences explaining the SIMULATION analysis: (1) State this is a SIMULATED fault_type scenario, (2) Describe SIMULATION telemetry evidence, (3) Acknowledge this is proxy simulation, not incident reconstruction, (4) Connect simulation results to safety_level, (5) Note recommendations are suggestions. Example: 'This analysis simulated a motor failure scenario. In simulation, the fault produced 12-degree roll deviation. NOTE: This represents quadrotor dynamics and may not match the reported aircraft. Recommendations are suggested mitigations for similar scenarios.'"
+        desc="3-5 sentences explaining the SIMULATION analysis: (1) State this is a SIMULATED fault_type scenario, (2) Describe SIMULATION telemetry evidence, (3) Acknowledge this is proxy simulation, not incident reconstruction, (4) Connect simulation results to safety_level, (5) Note recommendations are suggestions, (6) Include practical UAS descriptor context when available (model/class hint, color, size, shape). Example: 'This analysis simulated a motor failure scenario. In simulation, the fault produced 12-degree roll deviation. NOTE: This represents quadrotor dynamics and may not match the reported aircraft. Recommendations are suggested mitigations for similar scenarios.'"
     )
     
     # =========================================================================

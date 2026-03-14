@@ -6,10 +6,10 @@ Date: 2026-01-21
 Updated: 2026-02-05
 
 Unified evaluator that orchestrates all 4 research-grade metrics:
-- SFS: Scenario Fidelity Score (LLM translation accuracy)
+- CCR: Constraint Correctness Rate (LLM translation accuracy)
 - BRR: Behavior Reproduction Rate (telemetry anomaly detection)
 - ECC: Evidence-Conclusion Consistency (claim grounding)
-- ESRI: Executable Safety Reliability Index (SFS × BRR × ECC)
+- ESRI: Executable Safety Reliability Index (CCR/SFS × BRR × ECC)
 
 Produces per-incident evaluation reports with trust level assessment.
 
@@ -34,6 +34,8 @@ from .behavior_validation import BehaviorValidator
 from .evidence_consistency import EvidenceConsistencyChecker
 from .esri import ESRICalculator
 from .subsystem_analysis import SubsystemCausalAnalyzer
+from .constraint_correctness import ConstraintCorrectnessEvaluator
+from .uncertainty_robustness import UncertaintyRobustnessEvaluator
 
 # =============================================================================
 # CONFIDENCE CEILING CONSTANTS
@@ -44,7 +46,7 @@ from .subsystem_analysis import SubsystemCausalAnalyzer
 # PX4 simulation is a proxy model, not a reconstruction of the actual incident.
 # These ceilings prevent overconfidence in system outputs.
 ESRI_ABSOLUTE_CEILING = 0.85  # Maximum possible ESRI even with perfect components
-SFS_CEILING = 0.80            # LLM translation from ambiguous text
+SFS_CEILING = 0.80            # Legacy label; now applied to CCR as primary LLM translation score
 BRR_CEILING = 0.95            # Physics simulation accuracy
 ECC_CEILING = 1.0             # Evidence matching (can be perfect if well-supported)
 
@@ -57,9 +59,13 @@ class CaseEvaluationResult:
     evaluation_timestamp: str
     
     # Metric results
+    ccr: float
     sfs: float
     brr: float
     ecc: float
+    agi: float
+    urs: float
+    ees: float
     esri: float
     
     # Consistency assessment (NOT safety validation)
@@ -70,6 +76,7 @@ class CaseEvaluationResult:
     sfs_details: Dict
     brr_details: Dict
     ecc_details: Dict
+    urs_details: Dict
     
     # Anomaly summary
     detected_anomalies: List[Dict]
@@ -94,16 +101,45 @@ class CaseEvaluationResult:
             "evaluation_timestamp": self.evaluation_timestamp,
             "scores": {
                 "ESRI": round(self.esri, 4),
+                "CCR": round(self.ccr, 3),
                 "SFS": round(self.sfs, 3),
+                "BRS": round(self.brr, 3),
                 "BRR": round(self.brr, 3),
                 "ECC": round(self.ecc, 3),
+                "AGI": round(self.agi, 3),
+                "URS": round(self.urs, 3),
+                "EES": round(self.ees, 4),
+            },
+            "score_policy": {
+                "primary_framework": "CCR + BRR + AGI + URS",
+                "primary_formula": "EES = CCR * BRR * AGI * URS",
+                "legacy_framework": "ESRI",
+                "legacy_use": "comparison_only",
+                "metric_aliases": {
+                    "BRR": "BRS",
+                    "BRS": "BRR",
+                    "CCR": "SFS",
+                },
+                "urs_status": (
+                    "fallback"
+                    if self.urs_details.get("fallback_reason")
+                    else "top_n"
+                ),
+                "note": (
+                    "ESRI is retained only for historical comparison and migration continuity. "
+                    "Primary method defense should use the upgraded evaluation framework."
+                ),
             },
             "consistency_level": self.consistency_level,
             "consistency_justification": self.consistency_justification,
             "details": {
-                "scenario_fidelity": self.sfs_details,
+                "constraint_correctness": self.sfs_details,
                 "behavior_reproduction": self.brr_details,
                 "evidence_consistency": self.ecc_details,
+                "uncertainty_robustness": self.urs_details,
+                "legacy_aliases": {
+                    "scenario_fidelity": self.sfs_details,
+                },
             },
             "detected_anomalies": self.detected_anomalies,
             "unsupported_claims": self.unsupported_claims,
@@ -126,9 +162,14 @@ class CaseEvaluationResult:
             "Incident ID": self.incident_id,
             "Timestamp": self.evaluation_timestamp,
             "ESRI": round(self.esri, 4),
+            "CCR": round(self.ccr, 3),
+            "BRS": round(self.brr, 3),
             "SFS": round(self.sfs, 3),
             "BRR": round(self.brr, 3),
             "ECC": round(self.ecc, 3),
+            "AGI": round(self.agi, 3),
+            "URS": round(self.urs, 3),
+            "EES": round(self.ees, 4),
             "Consistency Level": self.consistency_level,
             "Anomaly Count": len(self.detected_anomalies),
             "Unsupported Claims": len(self.unsupported_claims),
@@ -154,9 +195,11 @@ class CaseEvaluator:
     """
     
     def __init__(self):
-        self.sfs_scorer = ScenarioFidelityScorer()
+        self.ccr_scorer = ConstraintCorrectnessEvaluator()
+        self.sfs_scorer = ScenarioFidelityScorer()  # Kept for backward compatibility if needed elsewhere
         self.brr_validator = BehaviorValidator()
         self.ecc_checker = EvidenceConsistencyChecker()
+        self.urs_evaluator = UncertaintyRobustnessEvaluator()
         self.esri_calculator = ESRICalculator()
         self.causal_analyzer = SubsystemCausalAnalyzer()
         
@@ -192,15 +235,15 @@ class CaseEvaluator:
         
         logger.info(f"Evaluating case: {incident_id}")
         
-        # 1. Compute SFS (Scenario Fidelity Score)
-        sfs_result = self.sfs_scorer.evaluate(faa_report, px4_config)
-        
-        # Apply SFS ceiling (LLM translation from ambiguous text)
-        raw_sfs = sfs_result.score
-        capped_sfs = min(raw_sfs, SFS_CEILING)
-        if capped_sfs < raw_sfs:
-            logger.info(f"SFS capped: {raw_sfs:.3f} → {capped_sfs:.3f} (ceiling: {SFS_CEILING})")
-            sfs_result.score = capped_sfs
+        # 1. Compute CCR (Constraint Correctness Rate)
+        ccr_result = self.ccr_scorer.evaluate(faa_report, px4_config)
+
+        # Apply legacy SFS ceiling to primary LLM translation score (CCR)
+        raw_ccr = ccr_result.score
+        capped_ccr = min(raw_ccr, SFS_CEILING)
+        if capped_ccr < raw_ccr:
+            logger.info(f"CCR capped: {raw_ccr:.3f} → {capped_ccr:.3f} (ceiling: {SFS_CEILING})")
+            ccr_result.score = capped_ccr
         
         # 2. Compute BRR (Behavior Reproduction Rate)
         fault_type = px4_config.get("fault_injection", {}).get("fault_type", "")
@@ -221,6 +264,20 @@ class CaseEvaluator:
             detected_anomalies_dicts,
             stats
         )
+        agi_score = ecc_result.agi_score
+
+        # 4. Compute URS (Uncertainty Robustness Score) scaffold.
+        alternative_configs = self._extract_alternative_configs(px4_config, safety_report)
+        base_verdict = (
+            safety_report.get("safety_level")
+            or safety_report.get("hazard_level")
+            or safety_report.get("risk_level")
+        )
+        urs_result = self.urs_evaluator.evaluate(
+            primary_config=px4_config,
+            alternative_configs=alternative_configs,
+            base_verdict=base_verdict,
+        )
         
         # Apply ECC ceiling (can be perfect if well-supported)
         raw_ecc = ecc_result.score
@@ -229,7 +286,7 @@ class CaseEvaluator:
             logger.info(f"ECC capped: {raw_ecc:.3f} → {capped_ecc:.3f} (ceiling: {ECC_CEILING})")
             ecc_result.score = capped_ecc
         
-        # 4. Perform Causal Subsystem Analysis (for research-level diagnosis)
+        # 5. Perform Causal Subsystem Analysis (for research-level diagnosis)
         # This determines which subsystem failed FIRST and builds a causal chain
         causal_result = self.causal_analyzer.analyze(detected_anomalies_dicts)
         causal_analysis_dict = causal_result.to_dict()
@@ -239,9 +296,16 @@ class CaseEvaluator:
             f"confidence={causal_result.confidence:.2f}, conclusive={causal_result.is_conclusive}"
         )
         
-        # 5. Compute ESRI (Executable Safety Reliability Index)
+        # 6. Compute ESRI (Executable Safety Reliability Index)
+        # NOTE: ESRI calculator currently expects SFS key. We provide CCR as SFS alias
+        # for backward compatibility while transitioning output nomenclature.
         esri_result = self.esri_calculator.calculate(
-            sfs_result.to_dict(),
+            {
+                "SFS": ccr_result.score,
+                "CCR": ccr_result.score,
+                "confidence": ccr_result.confidence,
+                "assessments": [a.to_dict() for a in ccr_result.assessments],
+            },
             brr_result.to_dict(),
             ecc_result.to_dict(),
             incident_id
@@ -270,20 +334,28 @@ class CaseEvaluator:
                     f"ESRI capped from {raw_esri:.3f} to {capped_esri:.3f} by guardrail. "
                     + esri_result.consistency_justification
                 )
+
+        # Primary composite metric for upgraded framework.
+        ees = ccr_result.score * brr_result.score * agi_score * urs_result.score
         
         # Build result with ceiling metadata
         result = CaseEvaluationResult(
             incident_id=incident_id,
             evaluation_timestamp=datetime.now().isoformat(),
-            sfs=sfs_result.score,
+            ccr=ccr_result.score,
+            sfs=ccr_result.score,
             brr=brr_result.score,
             ecc=ecc_result.score,
+            agi=agi_score,
+            urs=urs_result.score,
+            ees=ees,
             esri=esri_result.esri,
             consistency_level=esri_result.consistency_level,
             consistency_justification=esri_result.consistency_justification,
-            sfs_details=sfs_result.to_dict(),
+            sfs_details=ccr_result.to_dict(),
             brr_details=brr_result.to_dict(),
             ecc_details=ecc_result.to_dict(),
+            urs_details=urs_result.to_dict(),
             detected_anomalies=detected_anomalies_dicts,
             unsupported_claims=ecc_result.unsupported_claims,
             causal_analysis=causal_analysis_dict,
@@ -293,12 +365,36 @@ class CaseEvaluator:
         )
         
         logger.info(
-            f"Case evaluation complete: ESRI={result.esri * 100:.1f}% "
-            f"(SFS={result.sfs * 100:.0f}%, BRR={result.brr * 100:.0f}%, ECC={result.ecc * 100:.0f}%) "
+            f"Case evaluation complete: EES={result.ees * 100:.1f}%, ESRI={result.esri * 100:.1f}% "
+            f"(CCR={result.ccr * 100:.0f}%, BRR={result.brr * 100:.0f}%, AGI={result.agi * 100:.0f}%, URS={result.urs * 100:.0f}%) "
             f"[{result.consistency_level}]{' [CAPPED]' if was_capped else ''}"
         )
         
         return result
+
+    def _extract_alternative_configs(self, px4_config: Dict, safety_report: Dict) -> List[Dict]:
+        """Collect top-N feasible alternatives if upstream components provided them."""
+        for key in (
+            "alternative_configs",
+            "top_n_alternatives",
+            "candidate_configs",
+            "n_best_configs",
+        ):
+            value = px4_config.get(key)
+            if isinstance(value, list):
+                return [v for v in value if isinstance(v, dict)]
+
+        for key in (
+            "alternative_configs",
+            "top_n_alternatives",
+            "candidate_configs",
+            "n_best_configs",
+        ):
+            value = safety_report.get(key)
+            if isinstance(value, list):
+                return [v for v in value if isinstance(v, dict)]
+
+        return []
     
     def export_to_json(self, result: CaseEvaluationResult, output_path: Path) -> Path:
         """Export evaluation result to JSON file."""
@@ -441,6 +537,33 @@ class EvaluationExcelExporter:
         supported = result.ecc_details.get("supported_claims", 0)
         total = result.ecc_details.get("total_claims", 0)
         ws_summary.cell(row=row, column=4, value=f"{supported}/{total} claims supported").border = thin_border
+
+        # AGI row
+        row += 1
+        ws_summary.cell(row=row, column=1, value="AGI (Actionability & Grounding)").border = thin_border
+        ws_summary.cell(row=row, column=2, value=round(result.agi, 3)).border = thin_border
+        ws_summary.cell(row=row, column=3, value=result.ecc_details.get("confidence", "")).border = thin_border
+        agi_claim_count = result.ecc_details.get("agi_summary", {}).get("claim_count", 0)
+        ws_summary.cell(row=row, column=4, value=f"{agi_claim_count} recommendation/constraint claims scored").border = thin_border
+
+        # URS row
+        row += 1
+        ws_summary.cell(row=row, column=1, value="URS (Uncertainty Robustness)").border = thin_border
+        ws_summary.cell(row=row, column=2, value=round(result.urs, 3)).border = thin_border
+        ws_summary.cell(row=row, column=3, value=result.urs_details.get("confidence", "")).border = thin_border
+        fallback_reason = result.urs_details.get("fallback_reason")
+        ws_summary.cell(
+            row=row,
+            column=4,
+            value=fallback_reason or f"Top-N alternatives: {result.urs_details.get('alternative_count', 0)}",
+        ).border = thin_border
+
+        # EES row
+        row += 1
+        ws_summary.cell(row=row, column=1, value="EES (Primary Composite)").border = thin_border
+        ws_summary.cell(row=row, column=2, value=round(result.ees, 4)).border = thin_border
+        ws_summary.cell(row=row, column=3, value="PRIMARY").border = thin_border
+        ws_summary.cell(row=row, column=4, value="EES = CCR * BRS * AGI * URS").border = thin_border
         
         # Causal Analysis Summary (if available)
         if result.causal_analysis:

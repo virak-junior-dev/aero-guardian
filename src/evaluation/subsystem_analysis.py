@@ -689,7 +689,7 @@ class SubsystemCausalAnalyzer:
         
         # Add plausibility note if issues
         if result.chain_plausibility == "implausible":
-            parts.append("⚠️ Note: Causal chain timing may not be physically plausible.")
+            parts.append(">>>>> ️ Note: Causal chain timing may not be physically plausible.")
         
         return " ".join(parts)
 

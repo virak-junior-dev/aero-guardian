@@ -7,10 +7,10 @@ Date: 2026-01-30
 Research-grade evaluation framework for quantifying LLM-based safety analysis.
 
 Metrics (ESRI Framework):
-- SFS: Scenario Fidelity Score (LLM translation accuracy)
+- CCR: Constraint Correctness Rate (LLM translation accuracy)
 - BRR: Behavior Reproduction Rate (Simulation validity)  
 - ECC: Evidence-Conclusion Consistency (Report groundedness)
-- ESRI: Executable Safety Reliability Index = SFS × BRR × ECC
+- ESRI: Executable Safety Reliability Index = CCR/SFS × BRR × ECC
 
 USAGE:
     from src.evaluation import CaseEvaluator, get_case_evaluator
@@ -31,8 +31,10 @@ from .evaluate_case import (
 
 # Individual metrics (for advanced usage)
 from .scenario_fidelity import ScenarioFidelityScorer, SFSResult
+from .constraint_correctness import ConstraintCorrectnessEvaluator, CCRResult
 from .behavior_validation import BehaviorValidator, BRRResult
 from .evidence_consistency import EvidenceConsistencyChecker, ECCResult
+from .uncertainty_robustness import UncertaintyRobustnessEvaluator, URSResult
 from .esri import ESRICalculator, ESRIResult
 
 __all__ = [
@@ -42,6 +44,10 @@ __all__ = [
     "EvaluationExcelExporter",
     "get_case_evaluator",
     
+    # Constraint Correctness Rate (CCR)
+    "ConstraintCorrectnessEvaluator",
+    "CCRResult",
+
     # Scenario Fidelity Score (SFS)
     "ScenarioFidelityScorer",
     "SFSResult",
@@ -53,6 +59,10 @@ __all__ = [
     # Evidence-Conclusion Consistency (ECC)
     "EvidenceConsistencyChecker",
     "ECCResult",
+
+    # Uncertainty Robustness Score (URS)
+    "UncertaintyRobustnessEvaluator",
+    "URSResult",
     
     # ESRI (combined metric)
     "ESRICalculator",
