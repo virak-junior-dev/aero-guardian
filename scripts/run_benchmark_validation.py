@@ -118,6 +118,15 @@ class DatasetMetrics:
     # Timing
     avg_detection_latency_s: float = 0.0
     avg_processing_time_ms: float = 0.0
+    onset_delay_quantiles: Dict[str, float] = field(default_factory=dict)
+
+    # Aggregate F1 views for imbalance-aware reporting
+    macro_f1: float = 0.0
+    micro_f1: float = 0.0
+    weighted_f1: float = 0.0
+
+    # Per-flight trace rows for artifact export
+    flight_predictions: List[Dict] = field(default_factory=list)
     
     @property
     def precision(self) -> float:
@@ -458,6 +467,49 @@ class BenchmarkRunner:
             validation.detection_latency_s = sample_delay * 0.1  # Assume 10Hz
         
         return validation
+
+    @staticmethod
+    def _build_flight_prediction_row(validation: FlightValidation) -> Dict:
+        """Convert per-flight validation result into a traceable CSV-friendly row."""
+        predicted_fault = (validation.true_positives + validation.false_positives) > 0
+        actual_fault = validation.fault_samples > 0
+        return {
+            "flight_id": validation.flight_id,
+            "dataset": validation.dataset,
+            "fault_type": validation.fault_type,
+            "total_samples": validation.total_samples,
+            "fault_samples": validation.fault_samples,
+            "normal_samples": validation.normal_samples,
+            "tp": validation.true_positives,
+            "tn": validation.true_negatives,
+            "fp": validation.false_positives,
+            "fn": validation.false_negatives,
+            "accuracy": validation.accuracy,
+            "precision": validation.precision,
+            "recall": validation.recall,
+            "f1_score": validation.f1_score,
+            "detection_latency_s": validation.detection_latency_s,
+            "actual_fault": int(actual_fault),
+            "predicted_fault": int(predicted_fault),
+            "processing_time_ms": validation.processing_time_ms,
+        }
+
+    @staticmethod
+    def _compute_flight_level_confusion(flight_predictions: List[Dict]) -> Dict[str, int]:
+        """Compute flight-level confusion matrix from per-flight decisions."""
+        tp = tn = fp = fn = 0
+        for row in flight_predictions:
+            actual_fault = bool(row.get("actual_fault", 0))
+            predicted_fault = bool(row.get("predicted_fault", 0))
+            if actual_fault and predicted_fault:
+                tp += 1
+            elif (not actual_fault) and (not predicted_fault):
+                tn += 1
+            elif (not actual_fault) and predicted_fault:
+                fp += 1
+            else:
+                fn += 1
+        return {"tp": tp, "tn": tn, "fp": fp, "fn": fn}
     
     def run_dataset(self, df: pd.DataFrame, dataset_name: str) -> DatasetMetrics:
         """Run validation on entire dataset."""
@@ -532,6 +584,27 @@ class BenchmarkRunner:
         
         metrics.avg_detection_latency_s = np.mean(latencies) if latencies else 0
         metrics.avg_processing_time_ms = np.mean(processing_times) if processing_times else 0
+
+        if latencies:
+            metrics.onset_delay_quantiles = {
+                "mean": float(np.mean(latencies)),
+                "median": float(np.median(latencies)),
+                "p90": float(np.quantile(latencies, 0.90)),
+                "p95": float(np.quantile(latencies, 0.95)),
+            }
+        else:
+            metrics.onset_delay_quantiles = {"mean": 0.0, "median": 0.0, "p90": 0.0, "p95": 0.0}
+
+        # Imbalance-aware F1 views.
+        class_items = list(metrics.fault_type_metrics.values())
+        if class_items:
+            metrics.macro_f1 = float(np.mean([float(c.get("f1_score", 0.0)) for c in class_items]))
+            sample_weights = np.array([float(c.get("samples", 0.0)) for c in class_items], dtype=float)
+            sample_f1 = np.array([float(c.get("f1_score", 0.0)) for c in class_items], dtype=float)
+            metrics.weighted_f1 = float(np.average(sample_f1, weights=sample_weights)) if sample_weights.sum() > 0 else 0.0
+        metrics.micro_f1 = metrics.f1_score
+
+        metrics.flight_predictions = [self._build_flight_prediction_row(v) for v in flight_validations]
         
         return metrics
     
@@ -566,9 +639,14 @@ class BenchmarkRunner:
                 'precision': rflymad_metrics.precision,
                 'recall': rflymad_metrics.recall,
                 'f1_score': rflymad_metrics.f1_score,
+                'macro_f1': rflymad_metrics.macro_f1,
+                'micro_f1': rflymad_metrics.micro_f1,
+                'weighted_f1': rflymad_metrics.weighted_f1,
                 'avg_detection_latency_s': rflymad_metrics.avg_detection_latency_s,
                 'avg_processing_time_ms': rflymad_metrics.avg_processing_time_ms,
+                'onset_delay_quantiles': rflymad_metrics.onset_delay_quantiles,
                 'fault_types': rflymad_metrics.fault_type_metrics,
+                'flight_predictions': rflymad_metrics.flight_predictions,
                 'confusion_matrix': {
                     'tp': rflymad_metrics.true_positives,
                     'tn': rflymad_metrics.true_negatives,
@@ -576,6 +654,9 @@ class BenchmarkRunner:
                     'fn': rflymad_metrics.false_negatives,
                 }
             }
+            results['datasets']['RflyMAD']['flight_level_confusion_matrix'] = self._compute_flight_level_confusion(
+                rflymad_metrics.flight_predictions
+            )
             logger.info(f"RflyMAD: P={rflymad_metrics.precision:.3f}, R={rflymad_metrics.recall:.3f}, F1={rflymad_metrics.f1_score:.3f}")
             
             # Summary is just RflyMAD metrics
@@ -619,9 +700,14 @@ class BenchmarkRunner:
                 'precision': alfa_metrics.precision,
                 'recall': alfa_metrics.recall,
                 'f1_score': alfa_metrics.f1_score,
+                'macro_f1': alfa_metrics.macro_f1,
+                'micro_f1': alfa_metrics.micro_f1,
+                'weighted_f1': alfa_metrics.weighted_f1,
                 'avg_detection_latency_s': alfa_metrics.avg_detection_latency_s,
                 'avg_processing_time_ms': alfa_metrics.avg_processing_time_ms,
+                'onset_delay_quantiles': alfa_metrics.onset_delay_quantiles,
                 'fault_types': alfa_metrics.fault_type_metrics,
+                'flight_predictions': alfa_metrics.flight_predictions,
                 'confusion_matrix': {
                     'tp': alfa_metrics.true_positives,
                     'tn': alfa_metrics.true_negatives,
@@ -629,6 +715,9 @@ class BenchmarkRunner:
                     'fn': alfa_metrics.false_negatives,
                 }
             }
+            results['datasets']['ALFA']['flight_level_confusion_matrix'] = self._compute_flight_level_confusion(
+                alfa_metrics.flight_predictions
+            )
             logger.info(f"ALFA: P={alfa_metrics.precision:.3f}, R={alfa_metrics.recall:.3f}, F1={alfa_metrics.f1_score:.3f}")
         except Exception as e:
             logger.error(f"ALFA validation failed: {e}")
@@ -644,9 +733,14 @@ class BenchmarkRunner:
                 'precision': rflymad_metrics.precision,
                 'recall': rflymad_metrics.recall,
                 'f1_score': rflymad_metrics.f1_score,
+                'macro_f1': rflymad_metrics.macro_f1,
+                'micro_f1': rflymad_metrics.micro_f1,
+                'weighted_f1': rflymad_metrics.weighted_f1,
                 'avg_detection_latency_s': rflymad_metrics.avg_detection_latency_s,
                 'avg_processing_time_ms': rflymad_metrics.avg_processing_time_ms,
+                'onset_delay_quantiles': rflymad_metrics.onset_delay_quantiles,
                 'fault_types': rflymad_metrics.fault_type_metrics,
+                'flight_predictions': rflymad_metrics.flight_predictions,
                 'confusion_matrix': {
                     'tp': rflymad_metrics.true_positives,
                     'tn': rflymad_metrics.true_negatives,
@@ -654,6 +748,9 @@ class BenchmarkRunner:
                     'fn': rflymad_metrics.false_negatives,
                 }
             }
+            results['datasets']['RflyMAD']['flight_level_confusion_matrix'] = self._compute_flight_level_confusion(
+                rflymad_metrics.flight_predictions
+            )
             logger.info(f"RflyMAD: P={rflymad_metrics.precision:.3f}, R={rflymad_metrics.recall:.3f}, F1={rflymad_metrics.f1_score:.3f}")
         except Exception as e:
             logger.error(f"RflyMAD validation failed: {e}")
@@ -1004,7 +1101,14 @@ def export_validation_artifacts(results: Dict, output_dir: Path) -> Dict[str, st
             "precision": precision,
             "recall": recall,
             "f1_score": f1_score,
+            "macro_f1": float(rflymad.get("macro_f1", 0.0)),
+            "micro_f1": float(rflymad.get("micro_f1", 0.0)),
+            "weighted_f1": float(rflymad.get("weighted_f1", 0.0)),
             "avg_latency_s": float(rflymad.get("avg_detection_latency_s", 0.0)),
+            "latency_mean_s": float(rflymad.get("onset_delay_quantiles", {}).get("mean", 0.0)),
+            "latency_median_s": float(rflymad.get("onset_delay_quantiles", {}).get("median", 0.0)),
+            "latency_p90_s": float(rflymad.get("onset_delay_quantiles", {}).get("p90", 0.0)),
+            "latency_p95_s": float(rflymad.get("onset_delay_quantiles", {}).get("p95", 0.0)),
         }
     ]
 
@@ -1030,6 +1134,10 @@ def export_validation_artifacts(results: Dict, output_dir: Path) -> Dict[str, st
                 "recall": float(class_metrics.get("recall", 0.0)),
                 "f1_score": float(class_metrics.get("f1_score", 0.0)),
                 "avg_latency_s": float(class_metrics.get("avg_latency_s", 0.0)),
+                "latency_mean_s": float(class_metrics.get("avg_latency_s", 0.0)),
+                "latency_median_s": float(class_metrics.get("avg_latency_s", 0.0)),
+                "latency_p90_s": float(class_metrics.get("avg_latency_s", 0.0)),
+                "latency_p95_s": float(class_metrics.get("avg_latency_s", 0.0)),
             }
         )
 
@@ -1045,6 +1153,24 @@ def export_validation_artifacts(results: Dict, output_dir: Path) -> Dict[str, st
     )
     confusion_csv = output_dir / "rflymad_confusion_matrix.csv"
     confusion_df.to_csv(confusion_csv, index=False)
+
+    flight_predictions = rflymad.get("flight_predictions", [])
+    flight_trace_csv = output_dir / "rflymad_per_flight_predictions.csv"
+    pd.DataFrame(flight_predictions).to_csv(flight_trace_csv, index=False)
+
+    onset_distribution_csv = output_dir / "rflymad_onset_delay_distribution.csv"
+    onset_df = pd.DataFrame(
+        [
+            {
+                "flight_id": row.get("flight_id"),
+                "fault_type": row.get("fault_type"),
+                "detection_latency_s": row.get("detection_latency_s", 0.0),
+            }
+            for row in flight_predictions
+            if float(row.get("detection_latency_s", 0.0)) > 0
+        ]
+    )
+    onset_df.to_csv(onset_distribution_csv, index=False)
 
     matrix = np.array([[tp, fn], [fp, tn]], dtype=float)
     fig, ax = plt.subplots(figsize=(7.2, 5.8), dpi=220)
@@ -1073,6 +1199,8 @@ def export_validation_artifacts(results: Dict, output_dir: Path) -> Dict[str, st
         "metrics_csv": str(metrics_csv),
         "confusion_csv": str(confusion_csv),
         "confusion_image": str(confusion_img),
+        "per_flight_predictions_csv": str(flight_trace_csv),
+        "onset_delay_distribution_csv": str(onset_distribution_csv),
     }
 
 

@@ -418,6 +418,31 @@ Evidence:
 3. Updated report regenerated from strict mode:
 	- `outputs/verification/benchmark_report.txt`
 
+### 2026-03-14 RFlyMAD Validation Strengthening (Phase V1 Execution)
+
+Completed:
+1. Upgraded benchmark validator outputs in `scripts/run_benchmark_validation.py` without changing detector logic:
+	- added imbalance-aware aggregate metrics (`macro_f1`, `micro_f1`, `weighted_f1`)
+	- added onset-delay quantiles (`mean`, `median`, `p90`, `p95`)
+	- added per-flight prediction trace export fields and flight-level fault decisions
+	- added flight-level confusion matrix block in benchmark JSON results
+2. Extended artifact export pipeline to produce:
+	- `rflymad_per_flight_predictions.csv`
+	- `rflymad_onset_delay_distribution.csv`
+3. Re-ran strict default RFlyMAD-only validation to regenerate full artifacts package.
+
+Evidence:
+1. Regenerated strict benchmark results:
+	- `outputs/verification/benchmark_results.json`
+	- contains `mode: rflymad_only`, `datasets: [RflyMAD]`
+2. New Phase V1 artifacts:
+	- `outputs/verification/rflymad_per_flight_predictions.csv`
+	- `outputs/verification/rflymad_onset_delay_distribution.csv`
+3. Updated detailed metrics now include aggregate F1 variants and latency quantiles:
+	- `outputs/verification/rflymad_validation_metrics_detailed.csv`
+4. Flight-level confusion matrix now serialized in JSON:
+	- `flight_level_confusion_matrix: {tp: 616, tn: 36, fp: 4, fn: 167}`
+
 Exit Criteria:
 - [ ] No new dataset artifacts appear outside `data/new_data`
 - [ ] Artifact naming is raw-only canonical
