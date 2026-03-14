@@ -1,0 +1,4 @@
+https://www.faa.gov/uas/resources/public_records/uas_sightings_report - FAA (Drone Sightings Near Airports)
+https://kilthub.cmu.edu/articles/dataset/ALFA_A_Dataset_for_UAV_Fault_and_Anomaly_Detection/12707963/1 - Airlab(A Dataset for UAV Fault and Anomaly Detection)
+https://www.kaggle.com/datasets/xianglile/rflymad - RflyMAD (A Dataset for Multicopter Fault Detection and Health Assessment)
+https://rfly-openha.github.io/documents/4_resources/dataset.html - RflyMAD (A Dataset for Multicopter Fault Detection and Health Assessment)

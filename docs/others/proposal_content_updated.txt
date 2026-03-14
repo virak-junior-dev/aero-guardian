@@ -1,0 +1,238 @@
+# Ⅲ 제안 내용 (Proposal Content)
+# AeroGuardian: AI-Driven UAV Pre-Flight Safety Analysis Framework
+# Team: Tiny Coders
+# GNU RISE-AI Generative AI+X Ideas Competition 2026
+
+---
+
+## 제안 배경 (Background)
+
+Civilian UAV operations are rapidly expanding in shared airspace.
+
+UAV safety sighting and near-miss data are publicly available (e.g., FAA Drone Sightings Near Airports), but remain underutilized for proactive pre-flight safety planning.
+
+Current UAV safety practices focus primarily on post-incident analysis, rather than systematic pre-flight hazard anticipation.
+
+Existing UAV safety analysis approaches exhibit several limitations:
+
+- Simulation-based testing exists, but scenario selection is manual and heavily dependent on expert intuition.
+- Incident databases are not directly executable, making it difficult to translate past accidents into testable scenarios.
+- Safety engineers must analyze large volumes of incident reports without automated reasoning support.
+
+As a result, rare but high-impact hazard combinations are often overlooked, particularly when UAVs are deployed in new environments or mission profiles.
+
+Recent advances in LLMs enable:
+
+- Context-aware reasoning over large-scale textual data,
+- Generation of structured outputs under strict constraints, and
+- Integration with external tools such as simulators and analytics engines.
+
+These capabilities make it possible to bridge real-world safety knowledge and executable pre-flight testing, which was difficult to achieve using previous AI or rule-based methods.
+
+In particular, Generative AI (Large Language Models, LLMs) is well-suited to this domain because it can:
+
+- Reason over real-world incident cases expressed in natural language,
+- Convert implicit safety knowledge into structured hazard scenarios, and
+- Provide human-understandable safety explanations, which are essential in safety-critical systems.
+
+---
+
+## 해결하려는 문제 (Problem Definition)
+
+This project focuses specifically on pre-flight UAV safety analysis.
+
+Current pre-flight safety processes suffer from:
+
+- Manual and experience-driven hazard identification,
+- Limited reuse of historical incident knowledge,
+- Difficulty in converting safety knowledge into systematic, testable scenarios.
+
+As consequences:
+
+- Critical hazards may not be tested before deployment.
+- Safety quality depends heavily on individual operator expertise.
+- UAV missions face increased risk of unexpected failures.
+
+There is a strong need for a system that:
+
+- Systematically transforms real-world incidents into executable safety scenarios,
+- Evaluates mission risk before flight, and
+- Provides interpretable safety insights to human operators.
+
+---
+
+## 생성형 AI 활용 아이디어 (Generative AI Solution)
+
+We propose AeroGuardian, an AI-based pre-flight UAV safety analysis framework.
+
+In AeroGuardian, LLMs are used not as free-text generators, but as reasoning agents with clearly defined roles:
+
+- Interpreting real-world UAV safety sighting and near-miss narratives,
+- Generating schema-constrained hazard scenarios suitable for simulation,
+- Explaining safety risks in human-readable language.
+
+### Input
+- FAA incident report text (8,000+ real incidents from FAA database)
+- Mission configuration templates
+
+### Processing (IMPLEMENTED)
+- **LLM #1 (GPT-4o + DSPy):** Translates FAA incident text into 31 typed simulation parameters
+- **PX4 SITL + Gazebo:** Physics-based flight simulation with fault injection
+- **MAVSDK Python:** Drone control and 500-800 telemetry points collection
+- **LLM #2 (GPT-4o + DSPy):** Analyzes telemetry to generate evidence-grounded safety report
+- **ESRI Metric:** Quantifies trust in AI output (novel contribution)
+
+### Output
+- Mission-level risk classification (GO / CONDITIONAL GO / NO-GO)
+- Human-readable PDF safety report with evidence
+- Trust score (ESRI: 0-100%) with confidence level (HIGH/MEDIUM/LOW)
+- Full JSON/Excel evaluation data
+
+(*DSPy: a framework for programmatic optimization of LLM prompts with typed outputs.)
+
+### Key Innovation: ESRI Trust Metric
+
+Compared to traditional safety analysis approaches:
+
+- AeroGuardian automatically links real incident knowledge to simulation-based testing,
+- LLM-based reasoning enables context-aware and adaptive scenario generation,
+- The system provides explainable, data-driven safety decisions with quantifiable trust,
+- **ESRI = SFS × BRR × ECC** ensures any weak component penalizes final trust score.
+
+| Metric | Purpose | Implementation Status |
+|--------|---------|----------------------|
+| SFS (Scenario Fidelity Score) | Does config match FAA report? | ✅ Implemented |
+| BRR (Behavior Reproduction Rate) | Does simulation show expected anomalies? | ✅ Implemented |
+| ECC (Evidence-Conclusion Consistency) | Is report grounded in evidence? | ✅ Implemented |
+| ESRI (Emergency Scenario Replication Index) | Combined trust score | ✅ Implemented |
+
+---
+
+## 구현 방안 / 해결 방안 (Implementation Approach)
+
+AeroGuardian follows a modular cognitive pipeline, where each component has a single, verifiable responsibility:
+
+### Implemented Modules
+
+| # | Module | Status | Technology |
+|---|--------|--------|------------|
+| 1 | FAA Incident Processing | ✅ Complete | Python + JSON (8,031 incidents) |
+| 2 | LLM-based Scenario Generation | ✅ Complete | GPT-4o + DSPy (31 typed parameters) |
+| 3 | UAV Simulation | ✅ Complete | PX4 SITL v1.17 + Gazebo Harmonic |
+| 4 | Fault Injection | ✅ Complete | MAVSDK (motor, GPS, battery, 10+ fault types) |
+| 5 | Anomaly Detection | ✅ Complete | Rule-based + threshold detection (8 anomaly types) |
+| 6 | Risk Classification | ✅ Complete | ESRI metric with trust levels |
+| 7 | Safety Report Generation | ✅ Complete | GPT-4o + DSPy → PDF/JSON/Excel |
+
+### Pipeline Flow (6 Steps)
+
+```
+STEP 1: Load FAA Incident
+   ↓ (faa_simulatable.json - 8,031 incidents)
+STEP 2: LLM #1 generates PX4 configuration
+   ↓ (31 typed parameters via DSPy)
+STEP 3: PX4 SITL initialization
+   ↓ (Gazebo physics simulation)
+STEP 4: Mission execution + Fault injection
+   ↓ (500-800 telemetry points, fault at T+5s)
+STEP 5: LLM #2 generates safety report
+   ↓ (Evidence-grounded analysis)
+STEP 6: ESRI evaluation + Report generation
+   → PDF + JSON + Excel outputs
+```
+
+### Development Phases (COMPLETED)
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| Phase 1 | Incident data collection and preprocessing | ✅ Complete (8,031 FAA incidents) |
+| Phase 2 | Scenario schema design and LLM prompting | ✅ Complete (DSPy signatures) |
+| Phase 3 | UAV simulation and telemetry collection | ✅ Complete (PX4 SITL + MAVSDK) |
+| Phase 4 | Risk modeling and validation | ✅ Complete (ESRI metric) |
+| Phase 5 | Safety explanation and reporting | ✅ Complete (PDF/JSON/Excel) |
+
+---
+
+## 기술 스택 (Technology Stack)
+
+| Component | Technology | Purpose |
+|-----------|------------|---------|
+| LLM | OpenAI GPT-4o | Natural language understanding |
+| Framework | DSPy 2.5+ | Structured LLM outputs (31 typed fields) |
+| Simulation | PX4 SITL v1.17 | Industry-standard flight controller |
+| Physics | Gazebo Harmonic | 3D physics simulation |
+| Control | MAVSDK Python | Drone control and telemetry |
+| Fault Injection | PX4 Failure Module | Motor, GPS, battery failure simulation |
+| Platform | WSL2 Ubuntu 24.04 | Linux environment on Windows |
+| Language | Python 3.11 | Primary development |
+| Reports | ReportLab + Matplotlib | PDF generation with charts |
+
+---
+
+## 주요 성과 (Key Achievements)
+
+| Metric | Value |
+|--------|-------|
+| FAA incidents processable | 8,031 |
+| Simulation parameters per run | 31 typed fields |
+| Telemetry points per flight | 500-800 |
+| Supported fault types | 10 (motor, GPS, battery, servo, gyro, accel, mag, baro, RC, control) |
+| Anomaly detection types | 8 (altitude, velocity, pitch, roll, yaw, position, battery, GPS) |
+| Evaluation metrics | 4 → 1 unified ESRI score |
+| Output formats | PDF, JSON, Excel |
+| Trust levels | 3 (HIGH ≥70%, MEDIUM 40-70%, LOW <40%) |
+
+---
+
+## 샘플 결과 (Sample Results)
+
+### Typical Pipeline Output
+
+```
+Incident: FAA_Apr2021-Jun2021_787
+Fault Type: battery_failure
+Location: PHOENIX, ARIZONA
+
+ESRI Score: 75.6% (HIGH TRUST)
+├── SFS: 84% (config matches FAA report)
+├── BRR: 100% (5 anomalies detected)
+└── ECC: 90% (9/10 claims evidenced)
+
+Hazard Level: CRITICAL
+Decision: NO-GO
+Telemetry Points: 758
+Anomalies: altitude_instability, velocity_spike, pitch_instability, roll_instability, yaw_instability
+```
+
+---
+
+## 제한사항 및 향후 계획 (Limitations & Future Work)
+
+### Current Limitations
+
+| Limitation | Mitigation |
+|------------|------------|
+| GPS loss fault injection timeout on Gazebo Harmonic | Crash simulation fallback |
+| Single drone simulation only | Future: multi-drone scenarios |
+| ESRI depends on LLM quality | Use GPT-4o (high-quality model) |
+
+### Future Work
+
+1. Multi-drone fleet simulation
+2. Real flight data integration
+3. Continuous learning from new FAA data
+4. FAA Part 107 certification support
+5. Edge deployment for field operations
+
+---
+
+## 결론 (Conclusion)
+
+AeroGuardian demonstrates the successful integration of Generative AI with UAV simulation for pre-flight safety analysis. The system:
+
+1. **Automates** FAA incident → simulation → safety report pipeline
+2. **Quantifies** AI trust with ESRI metric (novel contribution)
+3. **Detects** LLM hallucinations via ECC component
+4. **Provides** production-ready outputs (PDF/JSON/Excel)
+
+This approach represents a significant advancement over manual safety analysis and unverified LLM outputs, offering a practical solution for UAV operators to systematically assess mission risks before flight.

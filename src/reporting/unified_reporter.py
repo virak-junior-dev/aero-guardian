@@ -633,12 +633,20 @@ class UnifiedReporter:
         # Check for fault alignment issue (P0)
         injection_marker = flight_config.get("px4_commands", {}).get("fault", "unknown")
         fault_type = flight_config.get("fault_injection", {}).get("fault_type", "unknown")
+        expected_marker = "mavsdk_emulation" if fault_injection_supported else "behavioral_only"
         fault_alignment_warning = None
-        if (not fault_injection_supported) and fault_type not in ["none", "unknown"]:
+        if str(injection_marker).strip().lower() != expected_marker:
+            fault_alignment_warning = (
+                f"MISMATCH: injection_marker='{injection_marker}' but expected '{expected_marker}' "
+                f"from fault_injection_supported={fault_injection_supported}."
+            )
+        elif (not fault_injection_supported) and fault_type not in ["none", "unknown"]:
             fault_alignment_warning = (
                 f"UNSUPPORTED: fault_type='{fault_type}' but fault_injection_supported=False "
                 f"(injection_marker='{injection_marker}'). Using behavioral emulation."
             )
+
+        fault_semantics_validation = flight_config.get("fault_semantics_validation", {})
         
         # Check for fault injection execution status
         fault_injection_status = flight_config.get("fault_injection_status", {})
@@ -679,6 +687,7 @@ class UnifiedReporter:
                 "uncertainty_interpretation": "LOW" if uncertainty_score < 0.4 else "MEDIUM" if uncertainty_score < 0.6 else "HIGH",
                 "fault_injection_supported": fault_injection_supported,
                 "fault_alignment_warning": fault_alignment_warning,
+                "fault_semantics_validation": fault_semantics_validation,
                 "fault_injection_status": {
                     "mode": fault_injection_mode,
                     "success": fault_injection_success,
