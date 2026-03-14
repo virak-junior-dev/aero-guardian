@@ -1,0 +1,12 @@
+{
+  "version": "rflymad_to_aeroguardian_v1",
+  "generated_at": "2026-03-14T00:00:00",
+  "source_dataset": "C:/VIRAK/Python Code/aero-guardian-full-version-including-dl&ml/data/raw/rflymad",
+  "notes": "Deterministic mapping from RFlyMAD fault labels to AeroGuardian subsystem categories used by benchmark attribution logic.",
+  "mapping": {
+    "normal": "normal",
+    "motor_fault": "propulsion",
+    "sensor_fault": "sensor",
+    "wind_fault": "control"
+  }
+}

@@ -22,6 +22,9 @@ from datetime import datetime
 import time
 
 
+RFLYMAD_CLEANED_DATASET = Path(__file__).parent.parent.parent / "data" / "new_data" / "rflymad" / "rflymad_cleaned.csv"
+
+
 @dataclass
 class BenchmarkConfig:
     """Configuration for benchmark validation."""
@@ -35,16 +38,17 @@ class BenchmarkConfig:
     # Timing parameters
     window_size: int = 50  # samples for rolling statistics
     min_fault_duration: float = 0.5  # seconds minimum to count as detection
-    
-    # Fault type mapping: external dataset → AeroGuardian categories
+
+    # Optional external mapping file: external dataset fault labels -> AeroGuardian categories.
+    fault_mapping_file: Optional[str] = None
+
+    # Inline fallback mapping when no external file is available.
     fault_mapping: Dict[str, str] = field(default_factory=lambda: {
-        # ALFA mappings
         "engine_failure": "propulsion",
         "normal": "normal",
-        # RflyMAD mappings
         "motor_fault": "propulsion",
         "sensor_fault": "sensor",
-        "wind_fault": "control",  # Environmental stress affects control
+        "wind_fault": "control",
     })
 
 
@@ -116,6 +120,56 @@ class GroundTruthBenchmark:
         self.config = config or BenchmarkConfig()
         self.data_dir = Path(__file__).parent.parent.parent / "data" / "raw"
         self._baseline_stats = None  # Cached baseline from normal flights
+        self.mapping_metadata = {
+            "source": "inline_default",
+            "path": None,
+            "version": "inline_v1",
+        }
+        self.fault_mapping = dict(self.config.fault_mapping)
+        self._load_fault_mapping()
+
+    def _load_fault_mapping(self) -> None:
+        """Load fault taxonomy mapping from versioned file if available."""
+        default_path = (
+            Path(__file__).parent.parent.parent
+            / "data"
+            / "new_data"
+            / "rflymad"
+            / "fault_taxonomy_mapping_v1.json"
+        )
+
+        mapping_path = Path(self.config.fault_mapping_file) if self.config.fault_mapping_file else default_path
+        if not mapping_path.exists():
+            return
+
+        try:
+            payload = json.loads(mapping_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and isinstance(payload.get("mapping"), dict):
+                mapping = payload["mapping"]
+                version = str(payload.get("version", "v1"))
+            elif isinstance(payload, dict):
+                mapping = payload
+                version = "v1"
+            else:
+                raise ValueError("fault mapping JSON must be an object")
+
+            normalized = {
+                str(k).strip().lower(): str(v).strip().lower()
+                for k, v in mapping.items()
+                if str(k).strip()
+            }
+            if not normalized:
+                raise ValueError("fault mapping JSON contains no entries")
+
+            self.fault_mapping = normalized
+            self.mapping_metadata = {
+                "source": "file",
+                "path": str(mapping_path),
+                "version": version,
+            }
+            print(f"[BENCHMARK] Loaded fault mapping from {mapping_path} ({len(normalized)} entries)")
+        except Exception as exc:
+            print(f"[BENCHMARK] Warning: failed to load fault mapping file {mapping_path}: {exc}")
     
     def load_alfa_dataset(self) -> pd.DataFrame:
         """Load ALFA dataset with ground truth labels."""
@@ -129,9 +183,12 @@ class GroundTruthBenchmark:
     
     def load_rflymad_dataset(self) -> pd.DataFrame:
         """Load RflyMAD dataset with ground truth labels."""
-        rflymad_path = self.data_dir / "rflymad" / "rflymad_cleaned.csv"
+        rflymad_path = RFLYMAD_CLEANED_DATASET
         if not rflymad_path.exists():
-            raise FileNotFoundError(f"RflyMAD dataset not found at {rflymad_path}")
+            raise FileNotFoundError(
+                f"RflyMAD cleaned dataset not found at {rflymad_path}. "
+                "Run scripts/process_rflymad_data.py first to generate it from authoritative raw data."
+            )
         
         df = pd.read_csv(rflymad_path)
         df['dataset'] = 'RflyMAD'
@@ -328,7 +385,7 @@ class GroundTruthBenchmark:
         is_fault_flight = ground_truth_fault != 'normal'
         
         # Map to AeroGuardian category
-        mapped_category = self.config.fault_mapping.get(ground_truth_fault, 'unknown')
+        mapped_category = self.fault_mapping.get(str(ground_truth_fault).strip().lower(), 'unknown')
         
         # Normalize timestamps to start at 0 (relative to flight start)
         if 'timestamp' in flight_data.columns:
@@ -545,6 +602,13 @@ class GroundTruthBenchmark:
             "timing_metrics": {
                 "mean_onset_delay_sec": round(report.mean_onset_delay, 3),
                 "median_onset_delay_sec": round(report.median_onset_delay, 3)
+            },
+            "fault_taxonomy_mapping": {
+                "source": self.mapping_metadata.get("source", "inline_default"),
+                "path": self.mapping_metadata.get("path"),
+                "version": self.mapping_metadata.get("version", "unknown"),
+                "entries": len(self.fault_mapping),
+                "mapping": self.fault_mapping,
             },
             "per_fault_breakdown": {
                 fault: {

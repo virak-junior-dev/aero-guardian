@@ -1,0 +1,13 @@
+{
+  "generated_at": "2026-03-14T22:40:14.626210",
+  "source_root": "C:\\VIRAK\\Python Code\\aero-guardian-full-version-including-dl&ml\\data\\raw\\rflymad",
+  "output_csv": "C:\\VIRAK\\Python Code\\aero-guardian\\data\\new_data\\rflymad\\rflymad_cleaned.csv",
+  "total_cases": 823,
+  "total_rows": 96477,
+  "fault_case_counts": {
+    "wind_fault": 539,
+    "motor_fault": 117,
+    "normal": 40,
+    "sensor_fault": 127
+  }
+}

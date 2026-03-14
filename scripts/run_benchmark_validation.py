@@ -24,6 +24,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 import numpy as np
+import matplotlib.pyplot as plt
 
 # Setup project paths
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -144,7 +145,7 @@ class BenchmarkDatasetLoader:
     def __init__(self, data_dir: Path):
         self.data_dir = Path(data_dir)
         self.alfa_path = self.data_dir / "raw" / "alfa" / "alfa_cleaned.csv"
-        self.rflymad_path = self.data_dir / "raw" / "rflymad" / "rflymad_cleaned.csv"
+        self.rflymad_path = self.data_dir / "new_data" / "rflymad" / "rflymad_cleaned.csv"
     
     def load_alfa(self, sample_fraction: float = 1.0) -> pd.DataFrame:
         """Load ALFA dataset."""
@@ -514,6 +515,11 @@ class BenchmarkRunner:
             
             metrics.fault_type_metrics[ft] = {
                 'flights': results['count'],
+                'samples': results['tp'] + results['tn'] + results['fp'] + results['fn'],
+                'tp': tp,
+                'tn': tn,
+                'fp': fp,
+                'fn': fn,
                 'precision': precision,
                 'recall': recall,
                 'f1_score': f1,
@@ -843,26 +849,8 @@ def compare_px4_to_benchmarks(data_dir: Path, output_dir: Path) -> Dict:
     # Load benchmark statistics
     loader = BenchmarkDatasetLoader(data_dir)
     try:
-        alfa_df = loader.load_alfa(sample_fraction=0.1)
         rflymad_df = loader.load_rflymad(sample_fraction=0.05)
-        
-        # ALFA statistics
-        comparison['benchmark_statistics']['ALFA'] = {
-            'total_samples': len(alfa_df),
-            'gyro_x': {
-                'mean': float(alfa_df['gyro_x'].mean()),
-                'std': float(alfa_df['gyro_x'].std()),
-            },
-            'gyro_y': {
-                'mean': float(alfa_df['gyro_y'].mean()),
-                'std': float(alfa_df['gyro_y'].std()),
-            },
-            'pos_z': {
-                'mean': float(alfa_df['pos_z'].mean()),
-                'std': float(alfa_df['pos_z'].std()),
-            },
-        }
-        
+
         # RflyMAD statistics
         comparison['benchmark_statistics']['RflyMAD'] = {
             'total_samples': len(rflymad_df),
@@ -885,7 +873,6 @@ def compare_px4_to_benchmarks(data_dir: Path, output_dir: Path) -> Dict:
             'note': 'PX4 SITL uses physics-based simulation; differences from real flight data are expected',
             'altitude_comparison': {
                 'px4_range': f"{comparison['px4_statistics']['altitude']['min']:.1f} - {comparison['px4_statistics']['altitude']['max']:.1f}m",
-                'alfa_mean': f"{comparison['benchmark_statistics']['ALFA']['pos_z']['mean']:.1f}m",
                 'rflymad_mean': f"{comparison['benchmark_statistics']['RflyMAD']['pos_z']['mean']:.1f}m",
             },
         }
@@ -975,6 +962,120 @@ def calibrate_thresholds(data_dir: Path, output_dir: Path) -> Dict:
     return calibration
 
 
+def _safe_div(numerator: float, denominator: float) -> float:
+    return float(numerator) / float(denominator) if denominator else 0.0
+
+
+def _compute_class_accuracy(tp: int, tn: int, fp: int, fn: int) -> float:
+    total = tp + tn + fp + fn
+    return _safe_div(tp + tn, total)
+
+
+def export_validation_artifacts(results: Dict, output_dir: Path) -> Dict[str, str]:
+    """Export paper-ready validation artifacts (CSV metrics, confusion matrix CSV, and image)."""
+    datasets = results.get("datasets", {})
+    if "RflyMAD" not in datasets or "error" in datasets.get("RflyMAD", {}):
+        raise ValueError("RflyMAD validation results are missing; cannot export artifacts")
+
+    rflymad = datasets["RflyMAD"]
+    cm = rflymad.get("confusion_matrix", {})
+    tp = int(cm.get("tp", 0))
+    tn = int(cm.get("tn", 0))
+    fp = int(cm.get("fp", 0))
+    fn = int(cm.get("fn", 0))
+
+    precision = _safe_div(tp, tp + fp)
+    recall = _safe_div(tp, tp + fn)
+    f1_score = _safe_div(2 * precision * recall, precision + recall)
+    accuracy = _compute_class_accuracy(tp, tn, fp, fn)
+
+    overall_rows = [
+        {
+            "scope": "overall",
+            "dataset": "RflyMAD",
+            "class_name": "ALL",
+            "support_flights": int(rflymad.get("total_flights", 0)),
+            "support_samples": int(rflymad.get("total_samples", 0)),
+            "tp": tp,
+            "tn": tn,
+            "fp": fp,
+            "fn": fn,
+            "accuracy": accuracy,
+            "precision": precision,
+            "recall": recall,
+            "f1_score": f1_score,
+            "avg_latency_s": float(rflymad.get("avg_detection_latency_s", 0.0)),
+        }
+    ]
+
+    class_rows = []
+    for class_name, class_metrics in rflymad.get("fault_types", {}).items():
+        ctp = int(class_metrics.get("tp", 0))
+        ctn = int(class_metrics.get("tn", 0))
+        cfp = int(class_metrics.get("fp", 0))
+        cfn = int(class_metrics.get("fn", 0))
+        class_rows.append(
+            {
+                "scope": "class",
+                "dataset": "RflyMAD",
+                "class_name": class_name,
+                "support_flights": int(class_metrics.get("flights", 0)),
+                "support_samples": int(class_metrics.get("samples", 0)),
+                "tp": ctp,
+                "tn": ctn,
+                "fp": cfp,
+                "fn": cfn,
+                "accuracy": _compute_class_accuracy(ctp, ctn, cfp, cfn),
+                "precision": float(class_metrics.get("precision", 0.0)),
+                "recall": float(class_metrics.get("recall", 0.0)),
+                "f1_score": float(class_metrics.get("f1_score", 0.0)),
+                "avg_latency_s": float(class_metrics.get("avg_latency_s", 0.0)),
+            }
+        )
+
+    metrics_df = pd.DataFrame(overall_rows + class_rows)
+    metrics_csv = output_dir / "rflymad_validation_metrics_detailed.csv"
+    metrics_df.to_csv(metrics_csv, index=False)
+
+    confusion_df = pd.DataFrame(
+        [
+            {"ground_truth": "fault", "predicted_fault": tp, "predicted_normal": fn},
+            {"ground_truth": "normal", "predicted_fault": fp, "predicted_normal": tn},
+        ]
+    )
+    confusion_csv = output_dir / "rflymad_confusion_matrix.csv"
+    confusion_df.to_csv(confusion_csv, index=False)
+
+    matrix = np.array([[tp, fn], [fp, tn]], dtype=float)
+    fig, ax = plt.subplots(figsize=(7.2, 5.8), dpi=220)
+    im = ax.imshow(matrix, cmap="Blues")
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(["Predicted Fault", "Predicted Normal"], fontsize=11)
+    ax.set_yticks([0, 1])
+    ax.set_yticklabels(["Actual Fault", "Actual Normal"], fontsize=11)
+    ax.set_title("RFlyMAD Confusion Matrix (Sample-Level)", fontsize=13, fontweight="bold", pad=12)
+
+    max_v = np.max(matrix) if np.max(matrix) > 0 else 1.0
+    for i in range(2):
+        for j in range(2):
+            value = int(matrix[i, j])
+            color = "white" if matrix[i, j] > 0.55 * max_v else "black"
+            ax.text(j, i, f"{value:,}", ha="center", va="center", color=color, fontsize=12, fontweight="bold")
+
+    fig.tight_layout()
+    confusion_img = output_dir / "rflymad_confusion_matrix.png"
+    fig.savefig(confusion_img, bbox_inches="tight")
+    plt.close(fig)
+
+    return {
+        "metrics_csv": str(metrics_csv),
+        "confusion_csv": str(confusion_csv),
+        "confusion_image": str(confusion_img),
+    }
+
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -992,7 +1093,9 @@ def main():
     parser.add_argument("--compare-px4", action="store_true",
                         help="Compare PX4 telemetry to benchmark datasets")
     parser.add_argument("--rflymad-only", action="store_true",
-                        help="Run validation on RflyMAD dataset only (recommended for competition demo)")
+                        help="Deprecated compatibility flag; RFlyMAD-only is now the default behavior")
+    parser.add_argument("--include-legacy-benchmarks", action="store_true",
+                        help="Include legacy mixed benchmark mode (ALFA + RFlyMAD). Not recommended for current plan.")
     parser.add_argument("--output", "-o", type=str, default=None,
                         help="Output directory (default: outputs/verification)")
     
@@ -1035,17 +1138,27 @@ def main():
         
         runner = BenchmarkRunner(data_dir, output_dir)
         
-        # Use --rflymad-only for competition demo (skips ALFA due to domain mismatch)
-        if getattr(args, 'rflymad_only', False):
+        # Strict-plan default: run RFlyMAD-only unless legacy mixing is explicitly requested.
+        if not getattr(args, 'include_legacy_benchmarks', False):
             results = runner.run_rflymad_only(sample_fraction=args.sample)
-            logger.info("Running RflyMAD-only mode (competition demo)")
+            logger.info("Running strict RFlyMAD-only mode (plan-compliant)")
         else:
             results = runner.run_all(sample_fraction=args.sample)
-        
-        # Add PX4 comparison to results
-        px4_comparison = compare_px4_to_benchmarks(data_dir, output_dir)
-        if 'error' not in px4_comparison:
-            results['px4_comparison'] = px4_comparison
+            logger.warning("Running legacy mixed benchmark mode (ALFA + RFlyMAD) by explicit request")
+
+        # Add PX4 comparison only in mixed/non-RFlyMAD-only mode.
+        if getattr(args, 'include_legacy_benchmarks', False):
+            px4_comparison = compare_px4_to_benchmarks(data_dir, output_dir)
+            if 'error' not in px4_comparison:
+                results['px4_comparison'] = px4_comparison
+
+        # Export detailed paper-ready artifacts.
+        try:
+            artifacts = export_validation_artifacts(results, output_dir)
+            results['paper_artifacts'] = artifacts
+            logger.info(f"Detailed validation artifacts saved: {artifacts}")
+        except Exception as e:
+            logger.warning(f"Could not export detailed validation artifacts: {e}")
         
         # Save JSON results
         runner.save_results(results)

@@ -76,6 +76,13 @@ Examples:
         default=30.0,
         help="Roll angle threshold in degrees (default: 30.0)"
     )
+
+    parser.add_argument(
+        "--fault-mapping",
+        type=str,
+        default=None,
+        help="Path to fault taxonomy mapping JSON (defaults to data/new_data/rflymad/fault_taxonomy_mapping_v1.json if present)"
+    )
     
     args = parser.parse_args()
     
@@ -88,7 +95,8 @@ Examples:
     config = BenchmarkConfig(
         position_drift_threshold=args.position_threshold,
         roll_threshold=args.roll_threshold,
-        pitch_threshold=args.roll_threshold  # Use same for pitch
+        pitch_threshold=args.roll_threshold,  # Use same for pitch
+        fault_mapping_file=args.fault_mapping,
     )
     
     print("="*60)
@@ -110,9 +118,11 @@ Examples:
         )
     except FileNotFoundError as e:
         print(f"\n[ERROR] {e}")
-        print("\nMake sure ALFA and RflyMAD datasets are in:")
+        print("\nMake sure datasets are prepared as follows:")
         print("  - data/raw/alfa/alfa_cleaned.csv")
-        print("  - data/raw/rflymad/rflymad_cleaned.csv")
+        print("  - RFlyMAD authoritative raw root: C:/VIRAK/Python Code/aero-guardian-full-version-including-dl&ml/data/raw/rflymad")
+        print("  - Generate cleaned dataset: python scripts/process_rflymad_data.py")
+        print("  - Expected cleaned file: data/new_data/rflymad/rflymad_cleaned.csv")
         sys.exit(1)
     except Exception as e:
         print(f"\n[ERROR] Benchmark failed: {e}")

@@ -465,6 +465,12 @@ class MissionExecutor:
         self.drone = None
         self.telemetry_data: List[Dict] = []
         self._capturing = False
+        self.last_fault_injection_status: Dict[str, object] = {
+            "mode": "not_started",
+            "success": True,
+            "warning": None,
+            "requested_fault_type": None,
+        }
     
     async def connect(self, max_retries: int = 3, retry_delay: float = 5.0) -> bool:
         """
@@ -641,6 +647,13 @@ class MissionExecutor:
             Tuple of (success, telemetry_data)
         """
         from mavsdk.mission import MissionItem, MissionPlan
+
+        self.last_fault_injection_status = {
+            "mode": "none",
+            "success": True,
+            "warning": None,
+            "requested_fault_type": fault_type,
+        }
         
         try:
             # =========================================================
@@ -764,6 +777,12 @@ class MissionExecutor:
                     if injection_success:
                         logger.info(f">>>>>  Fault {fault_type} injected successfully via PX4 native")
                         fault_injected = True
+                        self.last_fault_injection_status = {
+                            "mode": "native",
+                            "success": True,
+                            "warning": None,
+                            "requested_fault_type": fault_type,
+                        }
                         # Wait for native fault to take effect and complete
                         await asyncio.sleep(30)
                     else:
@@ -779,6 +798,12 @@ class MissionExecutor:
                             logger.info(f"   Phases: {' → '.join(emulation_result.phases_completed)}")
                             logger.info(f"   Observation duration: {emulation_result.observation_duration:.1f}s")
                             fault_injected = True
+                            self.last_fault_injection_status = {
+                                "mode": "emulated",
+                                "success": True,
+                                "warning": None,
+                                "requested_fault_type": fault_type,
+                            }
                             # Emulator handles its own timing and landing
                         else:
                             logger.warning(f">>>>>  Emulation failed: {emulation_result.error}")
@@ -786,6 +811,12 @@ class MissionExecutor:
                             await self.drone.action.land()
                             await asyncio.sleep(15)
                             fault_injected = True
+                            self.last_fault_injection_status = {
+                                "mode": "fallback",
+                                "success": False,
+                                "warning": f"fallback_after_emulation_failure:{emulation_result.error}",
+                                "requested_fault_type": fault_type,
+                            }
                     
                 except Exception as fault_err:
                     logger.error(f"Fault emulation failed: {fault_err}")
@@ -796,9 +827,21 @@ class MissionExecutor:
                     except Exception:
                         pass
                     fault_injected = True  # Mark as done to avoid retry
+                    self.last_fault_injection_status = {
+                        "mode": "fallback",
+                        "success": False,
+                        "warning": f"fault_emulation_exception:{fault_err}",
+                        "requested_fault_type": fault_type,
+                    }
             else:
                 # No fault - wait for mission to complete
                 logger.info(">>>>>  No fault injection - normal mission execution")
+                self.last_fault_injection_status = {
+                    "mode": "none",
+                    "success": True,
+                    "warning": None,
+                    "requested_fault_type": None,
+                }
             
             # =========================================================
             # MONITOR MISSION WITH TIMEOUT
@@ -869,6 +912,12 @@ class MissionExecutor:
         except Exception as e:
             logger.error(f"Mission execution failed: {e}")
             self.stop_telemetry_capture()
+            self.last_fault_injection_status = {
+                "mode": "failed",
+                "success": False,
+                "warning": f"mission_execution_exception:{e}",
+                "requested_fault_type": fault_type,
+            }
             
             # Emergency land
             try:
@@ -1321,6 +1370,36 @@ class AutomatedPipeline:
         logger.info("-" * 60)
         logger.info(f"  STEP {num}: {name}")
         logger.info("-" * 60)
+
+    @staticmethod
+    def _validate_fault_semantics(config: Dict) -> Dict[str, object]:
+        """Phase 4 gate: ensure support flags and runtime marker are deterministic and consistent."""
+        fault_type = str(config.get("fault_injection", {}).get("fault_type", "unknown") or "unknown").strip().lower()
+        marker = str(config.get("px4_commands", {}).get("fault", "unknown") or "unknown").strip().lower()
+        supported = bool(config.get("fault_injection_supported", True))
+
+        expected_marker = "mavsdk_emulation" if supported else "behavioral_only"
+        allowed_markers = {"mavsdk_emulation", "behavioral_only"}
+        behavior_only_faults = {"geofence_violation", "altitude_violation"}
+
+        violations: List[str] = []
+        if marker not in allowed_markers:
+            violations.append(f"invalid_injection_marker:{marker}")
+        if marker != expected_marker:
+            violations.append(f"marker_mismatch:expected_{expected_marker}_got_{marker}")
+        if supported and fault_type in behavior_only_faults:
+            violations.append(f"support_mismatch:behavior_only_fault_marked_supported:{fault_type}")
+        if (not supported) and marker != "behavioral_only":
+            violations.append("unsupported_fault_must_use_behavioral_only_marker")
+
+        return {
+            "pass": len(violations) == 0,
+            "fault_type": fault_type,
+            "fault_injection_supported": supported,
+            "injection_marker": marker,
+            "expected_injection_marker": expected_marker,
+            "violations": violations,
+        }
     
     def _load_incident(self, index: int) -> Dict:
         """Load FAA sighting by index."""
@@ -1439,6 +1518,14 @@ class AutomatedPipeline:
     
     async def _execute_mission(self, config: Dict) -> Tuple[bool, List[Dict]]:
         """Execute flight mission with fault injection support."""
+        semantics_gate = self._validate_fault_semantics(config)
+        config["fault_semantics_validation"] = semantics_gate
+        if not semantics_gate["pass"]:
+            raise ValueError(
+                "Phase 4 fault semantics gate failed: "
+                + ", ".join(semantics_gate["violations"])
+            )
+
         self.executor = MissionExecutor(self.config)
         
         if not await self.executor.connect():
@@ -1460,7 +1547,7 @@ class AutomatedPipeline:
         fault_config = config.get("fault_injection", {})
         fault_type = fault_config.get("fault_type", None)
         fault_onset_sec = fault_config.get("onset_sec", 60)  # Optimized by faa_scenario_generator
-        fault_severity = fault_config.get("severity", 1.0)
+        fault_severity = fault_config.get("fault_severity", fault_config.get("severity", 1.0))
 
         # Respect LLM capability mapping: if the generated config marks this fault as
         # not directly injectable in PX4, run as behavioral simulation without hardware injection.
@@ -1477,7 +1564,7 @@ class AutomatedPipeline:
         if fault_type:
             logger.info(f"  >>>>>  Fault injection: {fault_type} at T+{fault_onset_sec}s (severity: {fault_severity})")
         
-        return await self.executor.execute_mission(
+        success, telemetry = await self.executor.execute_mission(
             waypoints=waypoints,
             takeoff_alt=takeoff_alt,
             speed_m_s=speed_m_s,
@@ -1485,6 +1572,8 @@ class AutomatedPipeline:
             fault_onset_sec=fault_onset_sec,
             fault_severity=fault_severity
         )
+        config["fault_injection_status"] = dict(self.executor.last_fault_injection_status)
+        return success, telemetry
     
     def _generate_safety_report(self, incident: Dict, config: Dict, telemetry: List[Dict]) -> Dict:
         """Generate safety report using LLM."""
@@ -1531,6 +1620,8 @@ class AutomatedPipeline:
 
         injection_marker = str(config.get("px4_commands", {}).get("fault", "unknown")).strip().lower()
         fault_injection_supported = bool(config.get("fault_injection_supported", True))
+        fault_semantics_validation = config.get("fault_semantics_validation", {})
+        fault_semantics_pass = bool(fault_semantics_validation.get("pass", True))
 
         # Normalize awkward narrative terms for clearer professional reporting.
         raw_incident_text = incident.get("description", incident.get("summary", ""))
@@ -1582,6 +1673,8 @@ Speed: {speed} m/s
 Behavior: {report_fault_type} simulation
 Simulation Mode: {simulation_mode}
 Fault Injection Support: {fault_injection_supported} (injection_marker={injection_marker})
+Fault Semantics Gate: {'PASS' if fault_semantics_pass else 'FAIL'}
+Fault Execution Mode (planned): {'mavsdk_emulation' if fault_injection_supported else 'behavioral_only'}
 Altitude Source: {altitude_source}
 Reported Altitude (m): {reported_alt_m if reported_alt_m is not None else 'N/A'}
 Simulatable Altitude (m): {simulatable_alt_m if simulatable_alt_m is not None else 'N/A'}
